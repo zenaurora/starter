@@ -45,7 +45,7 @@ pub enum Event {
 /// One worker owns the file-name cache and serializes disk work. Typing never
 /// creates an OS thread per query; superseded requests are canceled before scanning.
 pub fn start() -> (Sender<Command>, Receiver<Event>) {
-    let (sender, commands) = async_channel::unbounded();
+    let (sender, commands) = async_channel::bounded(8);
     let (events, receiver) = async_channel::bounded(32);
     thread::Builder::new()
         .name("starter-search".into())
@@ -76,7 +76,7 @@ pub fn start() -> (Sender<Command>, Receiver<Event>) {
                         if cancelled.load(Ordering::Relaxed) {
                             continue;
                         }
-                        thread::sleep(Duration::from_millis(80));
+                        thread::sleep(Duration::from_millis(50));
                         if cancelled.load(Ordering::Relaxed) {
                             continue;
                         }

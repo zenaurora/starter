@@ -1,7 +1,7 @@
 use async_channel::{Receiver, Sender};
 use gpui_kit::RenderImage;
 use image::{Frame, RgbaImage};
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::{HashMap, VecDeque}, path::PathBuf, sync::Arc};
 
 pub struct Loaded {
     pub path: PathBuf,
@@ -12,6 +12,7 @@ pub struct Loaded {
 pub struct Icons {
     sender: Sender<PathBuf>,
     cache: HashMap<PathBuf, Option<Arc<RenderImage>>>,
+    lru: VecDeque<PathBuf>,
 }
 
 impl Icons {
@@ -36,6 +37,7 @@ impl Icons {
             Self {
                 sender,
                 cache: HashMap::new(),
+                lru: VecDeque::new(),
             },
             receiver,
         )
@@ -43,19 +45,36 @@ impl Icons {
 
     pub fn get(&mut self, path: &PathBuf) -> Option<Arc<RenderImage>> {
         if let Some(image) = self.cache.get(path) {
+            // Move to back (most recently used)
+            if let Some(pos) = self.lru.iter().position(|p| p == path) {
+                self.lru.remove(pos);
+            }
+            self.lru.push_back(path.clone());
             return image.clone();
         }
         if self.sender.try_send(path.clone()).is_ok() {
             self.cache.insert(path.clone(), None);
+            self.lru.push_back(path.clone());
         }
         None
     }
 
     pub fn insert(&mut self, loaded: Loaded) {
-        if self.cache.len() >= 512 {
-            self.cache.clear();
+        const MAX_CACHE_SIZE: usize = 512;
+
+        // Evict least recently used if at capacity
+        while self.cache.len() >= MAX_CACHE_SIZE && !self.lru.is_empty() {
+            if let Some(old_path) = self.lru.pop_front() {
+                self.cache.remove(&old_path);
+            }
         }
-        self.cache.insert(loaded.path, loaded.image);
+
+        self.cache.insert(loaded.path.clone(), loaded.image);
+
+        // Add to LRU if not already present
+        if !self.lru.iter().any(|p| p == &loaded.path) {
+            self.lru.push_back(loaded.path);
+        }
     }
 }
 

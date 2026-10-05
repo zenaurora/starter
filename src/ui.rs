@@ -1,3 +1,5 @@
+mod error_dialog;
+
 use crate::{
     appearance,
     icons::Icons,
@@ -5,6 +7,7 @@ use crate::{
     settings::{self, Settings},
     worker,
 };
+use error_dialog::ErrorDialog;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Icon, Sizable,
@@ -31,6 +34,8 @@ pub struct Launcher {
     input: Entity<InputState>,
     settings: Option<Entity<Settings>>,
     settings_subscription: Option<Subscription>,
+    error_dialog: Option<Entity<ErrorDialog>>,
+    error_dialog_subscription: Option<Subscription>,
     icons: Icons,
     config: Config,
     config_path: PathBuf,
@@ -47,7 +52,6 @@ pub struct Launcher {
     cancelled: Arc<AtomicBool>,
     scroll: UniformListScrollHandle,
     status: String,
-    error: Option<String>,
     visible: bool,
     searching: bool,
     _subscriptions: Vec<Subscription>,
@@ -60,7 +64,7 @@ impl Launcher {
         let (config, config_path) = match config::load_or_create() {
             Ok(value) => value,
             Err(problem) => {
-                error = Some(format!("配置读取失败：{problem:#}。当前使用默认设置。"));
+                error = Some(format!("配置读取失败：{problem:#}\n\n程序将使用默认设置运行。"));
                 (
                     Config::default(),
                     config::config_path().unwrap_or_else(|_| PathBuf::from("config.toml")),
@@ -70,7 +74,13 @@ impl Launcher {
         appearance::apply(config.theme, &config, window, cx);
         let history_path = config_path.with_file_name("usage.json");
         let history = History::load(history_path.clone()).unwrap_or_else(|problem| {
-            error = Some(format!("使用记录读取失败：{problem:#}"));
+            let msg = format!("使用记录读取失败：{problem:#}\n\n程序将使用空白历史记录。");
+            if let Some(existing) = &mut error {
+                existing.push_str("\n\n");
+                existing.push_str(&msg);
+            } else {
+                error = Some(msg);
+            }
             History::empty(history_path)
         });
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索应用，或输入 /f、/c"));
@@ -113,6 +123,7 @@ impl Launcher {
                         })
                         .is_err()
                     {
+                        eprintln!("Icon loader: main window closed, stopping icon worker");
                         break;
                     }
                 }
@@ -123,6 +134,7 @@ impl Launcher {
                         .update_in(cx, |this, _, cx| this.worker_event(event, cx))
                         .is_err()
                     {
+                        eprintln!("Search worker: main window closed, stopping worker");
                         break;
                     }
                 }
@@ -133,6 +145,7 @@ impl Launcher {
                         .update_in(cx, |this, window, cx| this.shell_event(event, window, cx))
                         .is_err()
                     {
+                        eprintln!("Shell events: main window closed, stopping shell handler");
                         break;
                     }
                 }
@@ -178,10 +191,32 @@ impl Launcher {
             })
             .unwrap_or(true)
         });
+
+        // Create error dialog if there were startup errors
+        let mut error_dialog = None;
+        let mut error_dialog_subscription = None;
+        if let Some(message) = error {
+            let dialog = cx.new(|cx| ErrorDialog::new(message, window, cx));
+            error_dialog_subscription = Some(cx.subscribe_in(
+                &dialog,
+                window,
+                |this, _, event, _window, cx| match event {
+                    error_dialog::Event::Close => {
+                        this.error_dialog = None;
+                        this.error_dialog_subscription = None;
+                        cx.notify();
+                    }
+                },
+            ));
+            error_dialog = Some(dialog);
+        }
+
         let mut this = Self {
             input,
             settings: None,
             settings_subscription: None,
+            error_dialog,
+            error_dialog_subscription,
             icons,
             config,
             config_path,
@@ -198,7 +233,6 @@ impl Launcher {
             cancelled: Arc::new(AtomicBool::new(false)),
             scroll: UniformListScrollHandle::new(),
             status: "正在读取应用列表…".into(),
-            error,
             visible: true,
             searching: false,
             _subscriptions: subscriptions,
@@ -293,14 +327,14 @@ impl Launcher {
             ShellEvent::Terminal => match platform::open_terminal(&self.config) {
                 Ok(()) => self.hide(window, cx),
                 Err(problem) => {
-                    self.error = Some(format!("{problem:#}"));
+                    self.status = format!("终端打开失败：{problem:#}");
                     self.show(window, cx);
                 }
             },
             ShellEvent::OpenSettings => self.open_settings(window, cx),
             ShellEvent::OpenConfig => {
                 if let Err(problem) = platform::open_target(&self.config_path) {
-                    self.error = Some(format!("{problem:#}"));
+                    self.status = format!("配置文件打开失败：{problem:#}");
                 }
             }
             ShellEvent::Reload => {
@@ -316,11 +350,11 @@ impl Launcher {
                         self.config = config;
                         self.settings = None;
                         self.settings_subscription = None;
-                        self.error = None;
+                        self.status = "配置已重新加载".into();
                         self.refresh(cx);
                     }
                     Err(problem) => {
-                        self.error = Some(format!("重新加载失败：{problem:#}"));
+                        self.status = format!("重新加载失败：{problem:#}");
                         self.show(window, cx);
                     }
                 }
@@ -362,12 +396,12 @@ impl Launcher {
                 if candidate.kind == Kind::App
                     && let Err(problem) = self.history.record(&candidate.id)
                 {
-                    self.error = Some(format!("记录保存失败：{problem:#}"));
+                    self.status = format!("记录保存失败：{problem:#}");
                 }
                 self.hide(window, cx);
             }
             Err(problem) => {
-                self.error = Some(format!("{problem:#}"));
+                self.status = format!("打开失败：{problem:#}");
                 cx.notify();
             }
         }
@@ -378,7 +412,7 @@ impl Launcher {
             match platform::reveal(&candidate.path) {
                 Ok(()) => self.hide(window, cx),
                 Err(problem) => {
-                    self.error = Some(format!("{problem:#}"));
+                    self.status = format!("显示失败：{problem:#}");
                     cx.notify();
                 }
             }
@@ -397,6 +431,17 @@ impl Launcher {
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let modifiers = event.keystroke.modifiers;
+        if cfg!(target_os = "macos")
+            && event.keystroke.key == "q"
+            && modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+        {
+            cx.stop_propagation();
+            cx.quit();
+            return;
+        }
         let close_modifier = if cfg!(target_os = "macos") {
             modifiers.platform
         } else {
@@ -519,7 +564,6 @@ impl Launcher {
         match result {
             Ok(()) => {
                 self.config = config;
-                self.error = None;
                 self.close_settings(window, cx);
                 self.refresh(cx);
                 self.status = "设置已保存".into();
@@ -559,7 +603,7 @@ impl Launcher {
                 self.scroll
                     .scroll_to_item(self.selected, ScrollStrategy::Nearest);
             }
-            Err(error) => self.error = Some(format!("收藏保存失败：{error:#}")),
+            Err(error) => self.status = format!("收藏保存失败：{error:#}"),
         }
         cx.notify();
     }
@@ -655,12 +699,12 @@ impl Launcher {
         match platform::open_target(path) {
             Ok(()) => {
                 if let Err(error) = self.history.record(id) {
-                    self.error = Some(format!("使用记录保存失败：{error:#}"));
+                    self.status = format!("使用记录保存失败：{error:#}");
                 }
                 self.hide(window, cx);
             }
             Err(error) => {
-                self.error = Some(format!("{error:#}"));
+                self.status = format!("打开失败：{error:#}");
                 cx.notify();
             }
         }
@@ -819,6 +863,13 @@ impl Drop for Launcher {
 
 impl Render for Launcher {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(dialog) = &self.error_dialog {
+            return div()
+                .size_full()
+                .capture_key_down(cx.listener(Self::key_down))
+                .child(dialog.clone())
+                .into_any_element();
+        }
         if let Some(settings) = &self.settings {
             return div()
                 .size_full()
@@ -954,19 +1005,6 @@ impl Render for Launcher {
                     ),
             )
             .when_some(recent, |this, recent| this.child(recent))
-            .when_some(self.error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .mx_4()
-                        .mb_2()
-                        .p_2()
-                        .rounded_md()
-                        .bg(theme.muted)
-                        .text_size(px(12.))
-                        .text_color(theme.danger)
-                        .child(error),
-                )
-            })
             .when(self.results.is_empty(), |this| {
                 this.child(
                     div()

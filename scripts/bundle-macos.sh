@@ -14,8 +14,9 @@ fi
 
 cargo build "${build_args[@]}"
 bundle="target/$profile/Starter.app"
-mkdir -p "$bundle/Contents/MacOS"
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp "target/$profile/starter" "$bundle/Contents/MacOS/starter"
 cp resources/macos/Info.plist "$bundle/Contents/Info.plist"
+cp resources/icons/Starter.icns "$bundle/Contents/Resources/Starter.icns"
 codesign --force --sign - "$bundle"
 echo "Created $bundle"

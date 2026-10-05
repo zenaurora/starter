@@ -139,19 +139,14 @@ impl Drop for Shell {
 }
 
 fn tray_icon() -> Result<Icon> {
-    let mut pixels = vec![0u8; 22 * 22 * 4];
-    for y in 0i32..22 {
-        for x in 0i32..22 {
-            let distance = (x - 9).pow(2) + (y - 9).pow(2);
-            let ring = (30..=55).contains(&distance);
-            let handle = (13..=19).contains(&x) && (x - y).abs() <= 1;
-            if ring || handle {
-                let offset = ((y * 22 + x) * 4) as usize;
-                pixels[offset..offset + 4].copy_from_slice(&[32, 32, 32, 255]);
-            }
-        }
-    }
-    Ok(Icon::from_rgba(pixels, 22, 22)?)
+    #[cfg(target_os = "macos")]
+    let bytes = include_bytes!("../resources/icons/tray-template.png").as_slice();
+    #[cfg(not(target_os = "macos"))]
+    let bytes = include_bytes!("../resources/icons/starter-64.png").as_slice();
+    // macOS displays this 72 px template at 18 pt, including on Retina screens.
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Ok(Icon::from_rgba(image.into_raw(), width, height)?)
 }
 
 pub fn open_target(path: &Path) -> Result<()> {

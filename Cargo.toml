@@ -9,11 +9,13 @@ license = "MIT"
 anyhow = "1"
 async-channel = "2"
 dirs = "6"
+# Pinned: API breaking changes in patch releases
 file_icon_provider = "=1.0.2"
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
 global-hotkey = "0.7"
 grep-regex = "0.1"
 grep-searcher = "0.1"
+# Pinned: UI framework with unstable APIs
 gpui-kit = "=0.7.1"
 ignore = "0.4"
 nucleo-matcher = "0.3"
