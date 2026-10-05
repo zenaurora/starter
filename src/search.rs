@@ -249,7 +249,7 @@ fn score_name(
             }
         })
         .min()?;
-    (distance <= tolerance).then_some(10_000 - distance as u32 * 1_000)
+    (distance <= tolerance).then(|| 10_000 - distance as u32 * 1_000)
 }
 
 #[derive(Default)]
@@ -471,6 +471,7 @@ mod tests {
             "Terminal"
         );
         assert!(rank(&apps, "zzzzzzzzzz", &BTreeMap::new()).is_empty());
+        assert!(rank(&apps, "这是一个完全不存在的应用名称", &BTreeMap::new()).is_empty());
         assert_eq!(rank(&apps, "!Safari", &BTreeMap::new())[0].title, "Safari");
         assert!(
             rank_cancellable(&apps, "term", &BTreeMap::new(), &AtomicBool::new(true)).is_none()
