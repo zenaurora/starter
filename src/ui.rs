@@ -396,6 +396,22 @@ impl Launcher {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let modifiers = event.keystroke.modifiers;
+        let close_modifier = if cfg!(target_os = "macos") {
+            modifiers.platform
+        } else {
+            modifiers.control
+        };
+        // Window dismissal also works inside settings and during text composition.
+        if event.keystroke.key == "w" && close_modifier && !modifiers.alt && !modifiers.shift {
+            if self.shell.is_some() {
+                self.hide(window, cx);
+            } else {
+                window.remove_window();
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.settings.is_some() {
             return;
         }
@@ -406,7 +422,6 @@ impl Launcher {
         if composing {
             return;
         }
-        let modifiers = event.keystroke.modifiers;
         match event.keystroke.key.as_str() {
             "up" | "down" if !modifiers.alt && !modifiers.control && !modifiers.platform => {
                 if !self.results.is_empty() {
@@ -805,7 +820,11 @@ impl Drop for Launcher {
 impl Render for Launcher {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(settings) = &self.settings {
-            return div().size_full().child(settings.clone()).into_any_element();
+            return div()
+                .size_full()
+                .capture_key_down(cx.listener(Self::key_down))
+                .child(settings.clone())
+                .into_any_element();
         }
         let list = uniform_list(
             "results",
