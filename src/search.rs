@@ -97,9 +97,41 @@ pub fn app_candidates(apps: &[Application], config: &Config) -> Vec<Candidate> {
             detail: app.path.display().to_string(),
             path: app.path.clone(),
             kind: Kind::App,
-            aliases: config.aliases.get(&app.name).cloned().unwrap_or_default(),
+            aliases: app_aliases(app, config),
         })
         .collect()
+}
+
+fn app_aliases(app: &Application, config: &Config) -> Vec<String> {
+    let mut aliases = app.aliases.clone();
+    // Some Windows shortcuts and apps without localized metadata use English
+    // names only. These exact-name aliases also work for existing configurations.
+    for name in std::iter::once(&app.name).chain(&app.aliases) {
+        let chinese: &[&str] = match name.to_lowercase().as_str() {
+            "wechat" | "weixin" => &["微信"],
+            "wecom" => &["企业微信"],
+            "tencentmeeting" | "tencent meeting" | "voov meeting" => &["腾讯会议"],
+            "dingtalk" => &["钉钉"],
+            "feishu" => &["飞书"],
+            "qq" => &["腾讯QQ"],
+            "neteasemusic" | "netease cloud music" => &["网易云音乐"],
+            "terminal" => &["终端"],
+            "system settings" | "system preferences" => &["系统设置", "系统偏好设置"],
+            "activity monitor" => &["活动监视器"],
+            "calculator" => &["计算器"],
+            "calendar" => &["日历"],
+            "notes" => &["备忘录"],
+            "reminders" => &["提醒事项"],
+            "preview" => &["预览"],
+            "photos" => &["照片"],
+            _ => &[],
+        };
+        aliases.extend(chinese.iter().map(|name| (*name).to_owned()));
+    }
+    aliases.extend(config.aliases.get(&app.name).into_iter().flatten().cloned());
+    aliases.sort();
+    aliases.dedup();
+    aliases
 }
 
 /// Relevance first; favorites and frequency order the default list and break ties.
@@ -479,6 +511,35 @@ mod tests {
     }
 
     #[test]
+    fn chinese_app_names_work_without_user_aliases() {
+        let apps =
+            ["WeChat", "WeCom", "TencentMeeting", "微信读书", "Terminal"].map(|name| Application {
+                id: name.into(),
+                name: name.into(),
+                path: PathBuf::from(format!("{name}.app")),
+                aliases: Vec::new(),
+            });
+        let mut config = Config::default();
+        config.aliases.insert("WeChat".into(), vec!["聊天".into()]);
+        let candidates = app_candidates(&apps, &config);
+        for (query, expected) in [
+            ("微信", "WeChat"),
+            ("企业微信", "WeCom"),
+            ("腾讯会议", "TencentMeeting"),
+            ("微信读", "微信读书"),
+            ("聊天", "WeChat"),
+            ("WeChat", "WeChat"),
+        ] {
+            let hits = rank(&candidates, query, &BTreeMap::new());
+            assert_eq!(
+                hits.first().map(|hit| hit.title.as_str()),
+                Some(expected),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn favorites_frequency_and_recent_are_independent() {
         let apps = vec![
             app("Safari"),
@@ -548,7 +609,8 @@ mod tests {
     fn content_is_literal_and_ignores_binary_and_gitignore() {
         let root = std::env::temp_dir().join(format!("starter-search-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("notes.txt"), "Needle.* is literal\nsecond line\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "Needle.* is literal\n研发计划\n").unwrap();
+        std::fs::write(root.join("项目计划.txt"), "中文搜索\n").unwrap();
         std::fs::write(root.join("binary"), b"Needle.*\0binary").unwrap();
         std::fs::write(root.join("ignored.txt"), "Needle.*").unwrap();
         std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
@@ -567,6 +629,23 @@ mod tests {
         assert!(hits[0].detail.ends_with("notes.txt:1"));
         let files = file_index(std::slice::from_ref(&root), &AtomicBool::new(false));
         assert!(!files.candidates.iter().any(|c| c.title == "ignored.txt"));
+        assert_eq!(
+            rank(&files.candidates, "项目", &BTreeMap::new())[0].title,
+            "项目计划.txt"
+        );
+        let mut chinese_hits = Vec::new();
+        content_search(
+            std::slice::from_ref(&root),
+            "研发",
+            &AtomicBool::new(false),
+            |batch| {
+                chinese_hits.extend(batch);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(chinese_hits.len(), 1);
+        assert!(chinese_hits[0].detail.ends_with("notes.txt:2"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
