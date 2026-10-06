@@ -111,6 +111,67 @@ fn activation_restores_search_focus_and_arrow_navigation(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn late_app_scan_leaves_an_in_flight_file_search_untouched(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    // Reproduce the race: showing the window queues an application scan, then the
+    // user immediately starts a file search that is still streaming when the scan
+    // lands. The late scan must not disturb the running one.
+    cx.update_window(handle.into(), |_, _, cx| {
+        launcher.update(cx, |this, cx| {
+            this.query = Query::parse("/f report");
+            this.generation = 7;
+            this.searching = true;
+            this.results = vec![Candidate {
+                id: "/report.txt".into(),
+                title: "report.txt".into(),
+                detail: String::new(),
+                path: PathBuf::from("/report.txt"),
+                kind: Kind::File,
+                aliases: Vec::new(),
+            }];
+            let generation = this.catalog_generation;
+            this.worker_event(
+                worker::Event::Apps {
+                    generation,
+                    catalog: Catalog::default(),
+                },
+                cx,
+            );
+            assert_eq!(
+                this.generation, 7,
+                "must not cancel the running disk search"
+            );
+            assert!(
+                this.searching,
+                "the file search must still be marked running"
+            );
+            assert_eq!(this.results.len(), 1, "streamed hits must survive");
+        })
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn app_scan_refreshes_the_app_list(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    // The other half: in Apps mode the scan must re-rank so newly installed apps appear.
+    cx.update_window(handle.into(), |_, _, cx| {
+        launcher.update(cx, |this, cx| {
+            let generation = this.catalog_generation;
+            this.worker_event(
+                worker::Event::Apps {
+                    generation,
+                    catalog: Catalog::default(),
+                },
+                cx,
+            );
+            assert_eq!(this.status, "0 个应用", "Apps mode must re-rank");
+        })
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn settings_tab_switch_preserves_escape_and_returns_search_focus(cx: &mut TestAppContext) {
     let (handle, launcher) = fixture(cx);
     cx.update_window(handle.into(), |_, window, cx| {

@@ -376,7 +376,16 @@ impl Launcher {
             } if generation == self.catalog_generation => {
                 self.candidates = search::app_candidates(&catalog.apps, &self.config);
                 self.catalog = catalog;
-                self.search(cx);
+                // Only the app list reads these candidates. Re-running `search` while
+                // a Files/Content query is in flight would cancel the running disk
+                // scan, clear the streamed results, reset the selection and replay the
+                // identical query after another debounce delay.
+                if self.query.mode == Mode::Apps {
+                    self.search(cx);
+                } else {
+                    // `recent` renders straight from `self.candidates`, so repaint.
+                    cx.notify();
+                }
             }
             worker::Event::Results {
                 generation,
