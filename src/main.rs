@@ -42,13 +42,21 @@ impl AssetSource for AppAssets {
 fn main() {
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
+        // 配置启动器窗口：固定尺寸、无标题栏的悬浮弹出窗口
         let options = WindowOptions {
+            // 窗口大小 720x560，并在屏幕上居中显示
             window_bounds: Some(WindowBounds::centered(size(px(720.), px(560.)), cx)),
+            // 不使用系统标题栏（采用自定义标题栏）
             titlebar: None,
+            // 窗口类型为弹出式（常用作 Spotlight 风格的启动器）
             kind: WindowKind::PopUp,
+            // 禁止用户调整窗口大小
             is_resizable: false,
+            // 禁止最小化窗口
             is_minimizable: false,
+            // 应用标识符，用于平台层关联窗口与任务栏
             app_id: Some("dev.starter.launcher".into()),
+            // 其余字段使用默认值
             ..Default::default()
         };
         match gpui_kit::open_window(options, cx, |window, cx| {
