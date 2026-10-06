@@ -1,4 +1,6 @@
 mod error_dialog;
+#[cfg(test)]
+mod tests;
 
 use crate::{
     appearance,
@@ -21,6 +23,7 @@ use starter::{
     config::{self, Config},
     history::History,
     search::{self, Candidate, Kind, Mode, Query},
+    updates::{self, Status as UpdateStatus},
 };
 use std::{
     path::PathBuf,
@@ -54,6 +57,7 @@ pub struct Launcher {
     status: String,
     visible: bool,
     searching: bool,
+    update_status: UpdateStatus,
     _subscriptions: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
 }
@@ -87,6 +91,7 @@ impl Launcher {
         });
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索应用，或输入 /f、/c"));
         input.update(cx, |state, cx| state.focus(window, cx));
+        let input_focus = input.focus_handle(cx);
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
                 InputEvent::Change => this.search(cx),
@@ -101,15 +106,9 @@ impl Launcher {
                 }
                 _ => {}
             }),
-            cx.observe_window_activation(window, |this, window, cx| {
-                if !window.is_window_active()
-                    && this.visible
-                    && this.shell.is_some()
-                    && this.settings.is_none()
-                {
-                    this.hide(window, cx);
-                }
-            }),
+            Self::observe_activation(window, cx),
+            cx.on_focus(&input_focus, window, |_, _, cx| cx.notify()),
+            cx.on_blur(&input_focus, window, |_, _, cx| cx.notify()),
         ];
         let (icons, icon_events) = Icons::new();
         let (worker, worker_events) = worker::start();
@@ -236,11 +235,77 @@ impl Launcher {
             status: "正在读取应用列表…".into(),
             visible: true,
             searching: false,
+            update_status: UpdateStatus::Idle,
             _subscriptions: subscriptions,
             _tasks: tasks,
         };
         this.refresh(cx);
+        if this.config.auto_check_updates {
+            this.check_updates(window, cx);
+        }
+        this._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(24 * 60 * 60))
+                    .await;
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        if this.config.auto_check_updates {
+                            this.check_updates(window, cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
         this
+    }
+
+    fn observe_activation(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active()
+                && this.visible
+                && this.settings.is_none()
+                && this.error_dialog.is_none()
+            {
+                this.input.update(cx, |input, cx| input.focus(window, cx));
+            } else if !window.is_window_active()
+                && this.visible
+                && this.shell.is_some()
+                && this.settings.is_none()
+            {
+                this.hide(window, cx);
+            }
+            cx.notify();
+        })
+    }
+
+    fn check_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.update_status == UpdateStatus::Checking {
+            return;
+        }
+        self.set_update_status(UpdateStatus::Checking, cx);
+        let check = cx.background_executor().spawn(async { updates::check() });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let status = match check.await {
+                Ok(status) => status,
+                Err(error) => UpdateStatus::Failed(format!("{error:#}")),
+            };
+            let _ = this.update_in(cx, |this, _, cx| this.set_update_status(status, cx));
+        }));
+    }
+
+    fn set_update_status(&mut self, status: UpdateStatus, cx: &mut Context<Self>) {
+        if let Some(settings) = &self.settings {
+            settings.update(cx, |settings, cx| {
+                settings.update_status = status.clone();
+                cx.notify();
+            });
+        }
+        self.update_status = status;
+        cx.notify();
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -377,6 +442,14 @@ impl Launcher {
             input.focus(window, cx);
         });
         self.search(cx);
+        // Native activation may complete after show() returns. Also restore
+        // focus once the current UI update and layout have settled.
+        cx.defer_in(window, |this, window, cx| {
+            if this.visible && this.settings.is_none() && this.error_dialog.is_none() {
+                this.input.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }
+        });
     }
 
     fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -521,12 +594,27 @@ impl Launcher {
             return;
         }
         let settings = cx.new(|cx| Settings::new(&self.config, window, cx));
+        settings.update(cx, |settings, _| {
+            settings.update_status = self.update_status.clone()
+        });
         self.settings_subscription = Some(cx.subscribe_in(
             &settings,
             window,
             |this, _, event, window, cx| match event {
                 settings::Event::Close => this.close_settings(window, cx),
                 settings::Event::OpenConfig => this.shell_event(ShellEvent::OpenConfig, window, cx),
+                settings::Event::CheckUpdates => this.check_updates(window, cx),
+                settings::Event::OpenRelease(url) => {
+                    if let Err(error) = open::that(url) {
+                        this.status = format!("无法打开下载页面：{error}");
+                        if let Some(settings) = &this.settings {
+                            settings.update(cx, |settings, cx| {
+                                settings.error = Some(this.status.clone());
+                                cx.notify();
+                            });
+                        }
+                    }
+                }
                 settings::Event::Preview(theme) => {
                     appearance::apply(*theme, &this.config, window, cx)
                 }
@@ -564,10 +652,14 @@ impl Launcher {
         })();
         match result {
             Ok(()) => {
+                let enable_updates = config.auto_check_updates && !self.config.auto_check_updates;
                 self.config = config;
                 self.close_settings(window, cx);
                 self.refresh(cx);
                 self.status = "设置已保存".into();
+                if enable_updates {
+                    self.check_updates(window, cx);
+                }
             }
             Err(error) => {
                 if let Some(settings) = &self.settings {
@@ -863,7 +955,7 @@ impl Drop for Launcher {
 }
 
 impl Render for Launcher {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(dialog) = &self.error_dialog {
             return div()
                 .size_full()
@@ -901,6 +993,8 @@ impl Render for Launcher {
         let show_recent = self.query.mode == Mode::Apps && self.query.text.is_empty();
         let recent = show_recent.then(|| self.recent(cx));
         let theme = cx.theme();
+        let input_focused =
+            window.is_window_active() && self.input.focus_handle(cx).is_focused(window);
         let modes = [
             (Mode::Apps, IconName::AppWindow, "应用", ""),
             (Mode::Files, IconName::FolderSearch, "文件 /f", "/f "),
@@ -938,17 +1032,42 @@ impl Render for Launcher {
                             ),
                     )
                     .child(
-                        Button::new("settings")
-                            .icon(IconName::Settings2)
-                            .ghost()
-                            .small()
-                            .tooltip(if cfg!(target_os = "macos") {
-                                "设置 ⌘,"
-                            } else {
-                                "设置 Ctrl+,"
-                            })
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                Button::new("search-focus-status")
+                                    .label(if input_focused {
+                                        "可直接输入 · ↑↓ 选择"
+                                    } else {
+                                        "点击搜索框输入"
+                                    })
+                                    .ghost()
+                                    .small()
+                                    .text_color(if input_focused {
+                                        theme.primary
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.input.update(cx, |input, cx| input.focus(window, cx));
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("settings")
+                                    .icon(IconName::Settings2)
+                                    .ghost()
+                                    .small()
+                                    .tooltip(if cfg!(target_os = "macos") {
+                                        "设置 ⌘,"
+                                    } else {
+                                        "设置 Ctrl+,"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_settings(window, cx)
+                                    })),
                             ),
                     ),
             )
@@ -956,8 +1075,12 @@ impl Render for Launcher {
                 div()
                     .px_5()
                     .py_3()
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .border_b_2()
+                    .border_color(if input_focused {
+                        theme.primary
+                    } else {
+                        theme.border
+                    })
                     .child(
                         Input::new(&self.input)
                             .large()
@@ -1006,6 +1129,26 @@ impl Render for Launcher {
                     ),
             )
             .when_some(recent, |this, recent| this.child(recent))
+            .when(
+                matches!(self.update_status, UpdateStatus::Available { .. }),
+                |this| {
+                    this.child(
+                        Button::new("update-notice")
+                            .label(format!("{} · 查看更新", self.update_status.label()))
+                            .ghost()
+                            .small()
+                            .mx_3()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings(window, cx);
+                                if let Some(settings) = &this.settings {
+                                    settings.update(cx, |settings, cx| {
+                                        settings.show_updates(window, cx)
+                                    });
+                                }
+                            })),
+                    )
+                },
+            )
             .when(self.results.is_empty(), |this| {
                 this.child(
                     div()

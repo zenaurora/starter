@@ -35,10 +35,13 @@ macOS 使用 `.app` 运行，以便托盘、窗口激活和原生图标正确工
 - **外观**：Catppuccin Mocha、Everforest、Gruvbox、Catppuccin Latte；点选预览，取消恢复，保存持久化。可设置已安装的等宽字体。
 - **搜索目录**：支持原生文件夹选择器和手工输入路径，一行一个，支持 `~`。
 - **应用别名**：填写应用名称和逗号分隔的别名，点击添加或更新；可移除。
+- **更新**：默认自动检查正式版本，可关闭或立即检查。启动时及持续运行期间每 24 小时检查 GitHub Release；发现新版后提供下载页面。
 
 保存时验证热键、目录和必填项；热键注册失败保留原设置。改动立即应用，无须重启。配置文件入口保留给高级编辑，手工修改后从托盘重新加载。
 
 `⌘W`（Windows `Ctrl+W`）在搜索页和设置页都可收起窗口，保留托盘和全局快捷键；再次使用呼出快捷键回到搜索页，设置中未保存的改动会取消。macOS 用 `⌘Q` 完整退出，也可使用托盘「退出」。
+
+窗口呼出并激活后，搜索框会重新获得焦点。顶部显示「可直接输入 · ↑↓ 选择」，搜索框下方同时显示强调色线条；焦点离开搜索框时提示「点击搜索框输入」，点击提示即可恢复。输入法正在选词时，上下键交给输入法处理。
 
 | 查询 | 行为 |
 | --- | --- |
@@ -63,8 +66,9 @@ macOS 使用 `.app` 运行，以便托盘、窗口激活和原生图标正确工
 - `src/search.rs`、`src/catalog.rs`：可独立测试的搜索和应用发现。
 - `src/worker.rs`：后台目录遍历、可取消搜索、80 ms 防抖、分批返回。
 - `src/config.rs`、`src/history.rs`：本地 TOML 配置和 JSON 使用记录。
+- `src/updates.rs`：后台检查 GitHub 正式版本，比较语义版本并报告更新状态。
 
-macOS 配置在 `~/Library/Application Support/starter/config.toml`，Windows 在 `%APPDATA%\starter\config.toml`。使用记录位于同目录 `usage.json`。无遥测、网络索引或云端同步。
+macOS 配置在 `~/Library/Application Support/starter/config.toml`，Windows 在 `%APPDATA%\starter\config.toml`。使用记录位于同目录 `usage.json`。更新检查只请求 GitHub 版本信息，不发送查询、目录、配置或使用记录。无遥测、网络索引或云端同步。
 
 ## 验证与当前范围
 

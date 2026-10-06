@@ -2,14 +2,16 @@ use crate::appearance;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     component::{
-        ActiveTheme, Sizable,
+        ActiveTheme, Disableable, Sizable,
         button::{Button, ButtonVariants},
         input::{Input, InputState, Textarea, TextareaState},
+        switch::Switch,
     },
     prelude::FluentBuilder,
     *,
 };
 use starter::config::{Config, ThemeName, expand_home};
+use starter::updates::{self, Status as UpdateStatus};
 use std::{path::PathBuf, str::FromStr};
 
 pub enum Event {
@@ -17,6 +19,8 @@ pub enum Event {
     Preview(ThemeName),
     Close,
     OpenConfig,
+    CheckUpdates,
+    OpenRelease(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -25,11 +29,13 @@ enum Tab {
     Appearance,
     Search,
     Aliases,
+    Updates,
 }
 
 pub struct Settings {
     draft: Config,
     tab: Tab,
+    focus: FocusHandle,
     launcher: Entity<InputState>,
     terminal_key: Entity<InputState>,
     terminal: Entity<InputState>,
@@ -38,12 +44,19 @@ pub struct Settings {
     alias_app: Entity<InputState>,
     alias_names: Entity<InputState>,
     pub error: Option<String>,
+    pub update_status: UpdateStatus,
     _tasks: Vec<Task<()>>,
 }
 
 impl EventEmitter<Event> for Settings {}
 
 impl Settings {
+    pub fn show_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab = Tab::Updates;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
     pub fn new(config: &Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let launcher =
             cx.new(|cx| InputState::new(window, cx).default_value(config.launcher_hotkey.clone()));
@@ -71,6 +84,7 @@ impl Settings {
         Self {
             draft: config.clone(),
             tab: Tab::General,
+            focus: cx.focus_handle(),
             launcher,
             terminal_key,
             terminal,
@@ -79,6 +93,7 @@ impl Settings {
             alias_app,
             alias_names,
             error: None,
+            update_status: UpdateStatus::Idle,
             _tasks: Vec::new(),
         }
     }
@@ -234,6 +249,30 @@ impl Settings {
         let theme = cx.theme();
         let body = div().w_full().flex().flex_col().gap_5();
         match self.tab {
+            Tab::Updates => body
+                .child(div().text_size(px(13.)).child(format!("当前版本 {}", updates::CURRENT_VERSION)))
+                .child(div().flex().items_center().justify_between()
+                    .child("自动检查更新")
+                    .child(Switch::new("auto-check-updates")
+                        .checked(self.draft.auto_check_updates)
+                        .on_change(cx.listener(|this, checked, _, cx| {
+                            this.draft.auto_check_updates = *checked;
+                            cx.notify();
+                        }))))
+                .child(div().text_size(px(12.)).text_color(theme.muted_foreground)
+                    .child("启动时及运行期间每 24 小时检查一次。保存设置后生效。"))
+                .child(div().text_size(px(12.)).child(self.update_status.label()))
+                .child(Button::new("check-updates").label("立即检查")
+                    .disabled(self.update_status == UpdateStatus::Checking)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(Event::CheckUpdates))))
+                .when_some(match &self.update_status {
+                    UpdateStatus::Available { url, .. } => Some(url.clone()),
+                    _ => None,
+                }, |body, url| body.child(Button::new("open-release").label("查看并下载新版本")
+                    .primary().on_click(cx.listener(move |_, _, _, cx| cx.emit(Event::OpenRelease(url.clone()))))))
+                .child(div().text_size(px(11.)).text_color(theme.muted_foreground)
+                    .child("通过 GitHub 检查正式版本，下载后使用安装包更新。"))
+                .into_any_element(),
             Tab::General => body
                 .child(Self::field("呼出快捷键", "格式：Alt+Space、Ctrl+Space、Super+Space", &self.launcher))
                 .child(Self::field("终端直达快捷键", "在其他应用中也能直接打开终端", &self.terminal_key))
@@ -296,12 +335,14 @@ impl Render for Settings {
             (Tab::Appearance, IconName::Palette, "外观"),
             (Tab::Search, IconName::FolderSearch, "搜索目录"),
             (Tab::Aliases, IconName::Tag, "应用别名"),
+            (Tab::Updates, IconName::RefreshCw, "更新"),
         ];
         let titles = match self.tab {
             Tab::General => ("快捷键与终端", "把常用动作缩短到一次按键。"),
             Tab::Appearance => ("外观", "熟悉的编辑器配色，安静的桌面入口。"),
             Tab::Search => ("搜索目录", "限定搜索范围，保持轻量。"),
             Tab::Aliases => ("应用别名", "用你习惯的名字打开应用。"),
+            Tab::Updates => ("更新", "检查 Starter 的新版本。"),
         };
         div()
             .size_full()
@@ -309,6 +350,7 @@ impl Render for Settings {
             .flex_col()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::key_down))
             .child(
                 div()
@@ -363,8 +405,9 @@ impl Render for Settings {
                                     .small()
                                     .w_full()
                                     .when(self.tab == tab, |b| b.bg(theme.accent))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
                                         this.tab = tab;
+                                        window.focus(&this.focus, cx);
                                         this.error = None;
                                         cx.notify();
                                     }))
@@ -376,7 +419,7 @@ impl Render for Settings {
                                     .pb_2()
                                     .text_size(px(10.))
                                     .text_color(theme.muted_foreground)
-                                    .child("Starter 0.1.0"),
+                                    .child(format!("Starter {}", updates::CURRENT_VERSION)),
                             ),
                     )
                     .child(

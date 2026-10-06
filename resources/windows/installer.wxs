@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Starter" Manufacturer="Starter" Version="$(var.Version)"
+           UpgradeCode="FFB725C5-A892-45C4-8986-0D516C7A82B2" Scope="perUser" Language="1033">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Starter is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="StarterIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="StarterIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/zenaurora/starter" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="UserPrograms" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Starter">
+          <Component Id="StarterExecutable" Guid="80548576-D7A8-4ED8-B641-3113015BA1CA">
+            <File Id="StarterExe" Source="$(var.SourceDir)\Starter.exe" />
+            <RegistryValue Root="HKCU" Key="Software\Starter" Name="InstalledVersion"
+                           Value="$(var.Version)" Type="string" KeyPath="yes" />
+            <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+            <RemoveFolder Id="RemoveUserProgramsIfEmpty" Directory="UserPrograms" On="uninstall" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="StarterMenuFolder" Name="Starter">
+        <Component Id="StarterShortcut" Guid="0DDB6390-4194-4F6D-8A08-2A1744FAB8D1">
+          <Shortcut Id="StarterStartMenu" Name="Starter" Target="[INSTALLFOLDER]Starter.exe"
+                    WorkingDirectory="INSTALLFOLDER" Icon="StarterIcon" />
+          <RemoveFolder Id="RemoveMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\Starter" Name="StartMenuShortcut"
+                         Value="1" Type="integer" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Starter" Title="Starter" Level="1">
+      <ComponentRef Id="StarterExecutable" />
+      <ComponentRef Id="StarterShortcut" />
+    </Feature>
+  </Package>
+</Wix>

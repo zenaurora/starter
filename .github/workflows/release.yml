@@ -34,6 +34,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Import Apple signing certificate
         shell: bash
         run: |
@@ -79,17 +81,32 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build and package ZIP
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install .NET for WiX
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build and package MSI and ZIP
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
           ./scripts/package-windows.ps1 -Version $version -OutputDirectory dist
 
+      - name: Verify MSI installation and uninstallation
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem dist/*.msi).FullName
+          ./scripts/test-windows-installer.ps1 -MsiPath $msi
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: Starter-windows-x86_64
-          path: dist/*.zip
+          path: |
+            dist/*.msi
+            dist/*.zip
           if-no-files-found: error
 
   publish:

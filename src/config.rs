@@ -15,6 +15,7 @@ pub struct Config {
     pub terminal_hotkey: String,
     /// macOS: application name; Windows: executable path/name. Never a shell string.
     pub terminal: String,
+    pub auto_check_updates: bool,
     pub search_roots: Vec<PathBuf>,
     pub aliases: BTreeMap<String, Vec<String>>,
     pub favorites: BTreeSet<String>,
@@ -43,6 +44,7 @@ impl Default for Config {
                 "wt.exe"
             }
             .into(),
+            auto_check_updates: true,
             search_roots: Vec::new(),
             aliases: BTreeMap::new(),
             favorites: BTreeSet::new(),
@@ -141,6 +143,7 @@ mod tests {
             .join("config.toml");
         let mut config = Config {
             theme: ThemeName::Everforest,
+            auto_check_updates: false,
             search_roots: vec![PathBuf::from("~/code")],
             ..Config::default()
         };
@@ -153,6 +156,7 @@ mod tests {
         save(&path, &config).unwrap();
         let saved = read(&path).unwrap();
         assert_eq!(saved.theme, ThemeName::Everforest);
+        assert!(!saved.auto_check_updates);
         assert_eq!(saved.search_roots, config.search_roots);
         assert_eq!(saved.aliases, config.aliases);
         assert_eq!(saved.favorites, config.favorites);
@@ -162,6 +166,7 @@ mod tests {
         let old: Config = toml::from_str("terminal = 'kitty'").unwrap();
         assert_eq!(old.theme, ThemeName::Catppuccin);
         assert_eq!(old.terminal, "kitty");
+        assert!(old.auto_check_updates);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
