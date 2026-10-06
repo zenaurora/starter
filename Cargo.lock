@@ -7026,7 +7026,6 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "open",
  "raw-window-handle",
- "semver",
  "serde",
  "serde_json",
  "strsim",

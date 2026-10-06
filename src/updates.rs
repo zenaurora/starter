@@ -1,5 +1,5 @@
+use crate::version::Version;
 use anyhow::{Context, Result};
-use semver::Version;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -67,10 +67,9 @@ fn check_at(endpoint: &str, current: &str) -> Result<Status> {
 
 fn release_status(body: &str, current: &str) -> Result<Status> {
     let release: Release = serde_json::from_str(body).context("GitHub 返回了无效的版本信息")?;
-    let version =
-        Version::parse(release.tag_name.trim_start_matches('v')).context("发布版本号格式不正确")?;
-    let current = Version::parse(current)?;
-    if release.draft || release.prerelease || !version.pre.is_empty() || version <= current {
+    let version = Version::parse(&release.tag_name).context("发布版本号格式不正确")?;
+    let current = Version::parse(current).context("当前版本号格式不正确")?;
+    if release.draft || release.prerelease || version.is_prerelease() || version <= current {
         return Ok(Status::UpToDate);
     }
     Ok(Status::Available {
@@ -96,7 +95,7 @@ mod tests {
             ("v0.1.0", false, false),
             ("v0.0.9", false, false),
             ("v0.10.0", false, true),
-            ("v0.2.0-beta.1", false, false),
+            ("v0.2.0-rc1", false, false),
             ("v0.2.0", true, false),
         ] {
             let body = serde_json::json!({"tag_name": tag, "prerelease": prerelease}).to_string();
