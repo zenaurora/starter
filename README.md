@@ -21,6 +21,8 @@ cargo run --locked
 
 macOS 使用 `.app` 运行，以便托盘、窗口激活和原生图标正确工作。打包脚本使用本地 ad-hoc 签名，还不是公证的分发包。
 
+给别人发布时，推送 `v` 开头的 tag 即可触发 GitHub Actions，自动生成 Apple Silicon macOS、Intel macOS 和 Windows 安装包，并创建 GitHub Release。正式签名、公证和首次配置见 [RELEASING.md](RELEASING.md)。
+
 图标使用折线「S」。macOS 菜单栏嵌入 72 px 单色模板，由系统按 18 pt 显示并适配深浅外观；应用包包含 16–1024 px 的 `.icns`。图标资源位于 `resources/icons`，在 macOS 上运行 `swift scripts/generate-icons.swift` 可重新生成。
 
 ## 使用与设置
