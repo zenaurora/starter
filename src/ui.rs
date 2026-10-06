@@ -239,7 +239,8 @@ impl Launcher {
             _subscriptions: subscriptions,
             _tasks: tasks,
         };
-        this.refresh(cx);
+        this.refresh_apps();
+        this.search(cx);
         if this.config.auto_check_updates {
             this.check_updates(window, cx);
         }
@@ -308,10 +309,22 @@ impl Launcher {
         cx.notify();
     }
 
-    fn refresh(&mut self, cx: &mut Context<Self>) {
+    /// Re-scan applications without disturbing the cached file index. Cheap
+    /// enough to run every time the window is shown, so apps installed while
+    /// the launcher was running become searchable without a restart. The
+    /// resulting `Event::Apps` re-ranks the list through `search`.
+    fn refresh_apps(&mut self) {
+        self.catalog_generation += 1;
+        let _ = self.worker.try_send(worker::Command::Apps {
+            generation: self.catalog_generation,
+        });
+    }
+
+    /// Explicit user-requested refresh: applications *and* the file index.
+    fn refresh_all(&mut self, cx: &mut Context<Self>) {
         self.catalog_generation += 1;
         self.status = "正在刷新应用与文件列表…".into();
-        let _ = self.worker.try_send(worker::Command::Catalog {
+        let _ = self.worker.try_send(worker::Command::Refresh {
             generation: self.catalog_generation,
         });
         self.search(cx);
@@ -357,7 +370,7 @@ impl Launcher {
 
     fn worker_event(&mut self, event: worker::Event, cx: &mut Context<Self>) {
         match event {
-            worker::Event::Catalog {
+            worker::Event::Apps {
                 generation,
                 catalog,
             } if generation == self.catalog_generation => {
@@ -417,7 +430,8 @@ impl Launcher {
                         self.settings = None;
                         self.settings_subscription = None;
                         self.status = "配置已重新加载".into();
-                        self.refresh(cx);
+                        self.refresh_apps();
+                        self.search(cx);
                     }
                     Err(problem) => {
                         self.status = format!("重新加载失败：{problem:#}");
@@ -425,7 +439,7 @@ impl Launcher {
                     }
                 }
             }
-            ShellEvent::Refresh => self.refresh(cx),
+            ShellEvent::Refresh => self.refresh_all(cx),
             ShellEvent::Quit => cx.quit(),
         }
         cx.notify();
@@ -441,6 +455,7 @@ impl Launcher {
             input.set_value("", window, cx);
             input.focus(window, cx);
         });
+        self.refresh_apps();
         self.search(cx);
         // Native activation may complete after show() returns. Also restore
         // focus once the current UI update and layout have settled.
@@ -655,7 +670,8 @@ impl Launcher {
                 let enable_updates = config.auto_check_updates && !self.config.auto_check_updates;
                 self.config = config;
                 self.close_settings(window, cx);
-                self.refresh(cx);
+                self.refresh_apps();
+                self.search(cx);
                 self.status = "设置已保存".into();
                 if enable_updates {
                     self.check_updates(window, cx);

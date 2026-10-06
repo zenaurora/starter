@@ -16,9 +16,12 @@ use std::{
 };
 
 pub enum Command {
-    Catalog {
-        generation: u64,
-    },
+    /// Re-scan applications only. Cheap enough to run every time the window is
+    /// shown, and it deliberately leaves the cached file index warm.
+    Apps { generation: u64 },
+    /// Re-scan applications *and* drop the cached file index so the next `/f`
+    /// search rebuilds it. Reserved for the explicit tray-menu refresh.
+    Refresh { generation: u64 },
     Search {
         generation: u64,
         query: Query,
@@ -28,7 +31,7 @@ pub enum Command {
 }
 
 pub enum Event {
-    Catalog {
+    Apps {
         generation: u64,
         catalog: Catalog,
     },
@@ -54,10 +57,24 @@ pub fn start() -> (Sender<Command>, Receiver<Event>) {
             let mut index = FileIndex::default();
             while let Ok(command) = commands.recv_blocking() {
                 match command {
-                    Command::Catalog { generation } => {
-                        cached_roots = None;
+                    Command::Apps { generation } => {
                         if events
-                            .send_blocking(Event::Catalog {
+                            .send_blocking(Event::Apps {
+                                generation,
+                                catalog: catalog::discover(),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Command::Refresh { generation } => {
+                        // Rebuilding the index costs far more than re-scanning the
+                        // application folders, so only an explicit refresh drops it.
+                        cached_roots = None;
+                        index = FileIndex::default();
+                        if events
+                            .send_blocking(Event::Apps {
                                 generation,
                                 catalog: catalog::discover(),
                             })
