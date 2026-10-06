@@ -56,17 +56,14 @@ impl Render for ErrorDialog {
                             .child(self.message.clone()),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .child(
-                                Button::new("close")
-                                    .primary()
-                                    .child("确定")
-                                    .on_click(cx.listener(|_, _, _, cx| {
-                                        cx.emit(Event::Close);
-                                    })),
-                            ),
+                        div().flex().justify_end().child(
+                            Button::new("close")
+                                .primary()
+                                .child("确定")
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(Event::Close);
+                                })),
+                        ),
                     ),
             )
     }

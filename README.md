@@ -4,7 +4,7 @@ Rust + [GPUI Kit](https://github.com/longbridge/gpui-kit) 桌面启动器，面�
 
 ## 运行
 
-需要 Rust 2024 edition 工具链。macOS 需要 Xcode Command Line Tools；Windows 需要 Visual Studio C++ Build Tools 和 Windows SDK。
+需要 Rust 1.90 或更新版本（2024 edition）。macOS 需要 Xcode Command Line Tools；Windows 需要 Visual Studio C++ Build Tools 和 Windows SDK。
 
 ```sh
 # macOS 开发运行（生成带身份标识的原生 .app）

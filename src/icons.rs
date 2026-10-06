@@ -1,7 +1,11 @@
 use async_channel::{Receiver, Sender};
 use gpui_kit::RenderImage;
 use image::{Frame, RgbaImage};
-use std::{collections::{HashMap, VecDeque}, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    sync::Arc,
+};
 
 pub struct Loaded {
     pub path: PathBuf,

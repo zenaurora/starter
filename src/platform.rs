@@ -67,10 +67,12 @@ impl Shell {
         }));
         let tray = TrayIconBuilder::new()
             .with_tooltip("Starter")
-            .with_icon(tray_icon()?)
-            .with_icon_as_template(true)
-            .with_menu(Box::new(menu))
-            .build()?;
+            .with_menu(Box::new(menu));
+        #[cfg(target_os = "macos")]
+        let tray = tray.with_icon_templated(tray_icon()?);
+        #[cfg(not(target_os = "macos"))]
+        let tray = tray.with_icon(tray_icon()?);
+        let tray = tray.build()?;
         // Route by the active hotkey IDs at receipt time, so reloading config works.
         let (key_sender, key_receiver) = async_channel::unbounded();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {

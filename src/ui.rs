@@ -64,7 +64,9 @@ impl Launcher {
         let (config, config_path) = match config::load_or_create() {
             Ok(value) => value,
             Err(problem) => {
-                error = Some(format!("配置读取失败：{problem:#}\n\n程序将使用默认设置运行。"));
+                error = Some(format!(
+                    "配置读取失败：{problem:#}\n\n程序将使用默认设置运行。"
+                ));
                 (
                     Config::default(),
                     config::config_path().unwrap_or_else(|_| PathBuf::from("config.toml")),
@@ -197,17 +199,16 @@ impl Launcher {
         let mut error_dialog_subscription = None;
         if let Some(message) = error {
             let dialog = cx.new(|cx| ErrorDialog::new(message, window, cx));
-            error_dialog_subscription = Some(cx.subscribe_in(
-                &dialog,
-                window,
-                |this, _, event, _window, cx| match event {
-                    error_dialog::Event::Close => {
-                        this.error_dialog = None;
-                        this.error_dialog_subscription = None;
-                        cx.notify();
-                    }
-                },
-            ));
+            error_dialog_subscription =
+                Some(
+                    cx.subscribe_in(&dialog, window, |this, _, event, _window, cx| match event {
+                        error_dialog::Event::Close => {
+                            this.error_dialog = None;
+                            this.error_dialog_subscription = None;
+                            cx.notify();
+                        }
+                    }),
+                );
             error_dialog = Some(dialog);
         }
 
