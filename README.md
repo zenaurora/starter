@@ -21,7 +21,7 @@ cargo run --locked
 
 macOS 使用 `.app` 运行，以便托盘、窗口激活和原生图标正确工作。打包脚本使用本地 ad-hoc 签名，还不是公证的分发包。
 
-给别人发布时，推送 `v` 开头的 tag 即可触发 GitHub Actions，自动生成 Apple Silicon macOS、Intel macOS 和 Windows 安装包，并创建 GitHub Release。正式签名、公证和首次配置见 [RELEASING.md](RELEASING.md)。
+给别人发布时，推送 `v` 开头的 tag 即可触发 GitHub Actions，自动生成 Apple Silicon macOS、Intel macOS 和 Windows 安装包，并创建 GitHub Release。配置 Apple Developer 证书及公证 secrets 后，发布工作流支持正式签名与公证。
 
 图标使用折线「S」。macOS 菜单栏嵌入 72 px 单色模板，由系统按 18 pt 显示并适配深浅外观；应用包包含 16–1024 px 的 `.icns`。图标资源位于 `resources/icons`，在 macOS 上运行 `swift scripts/generate-icons.swift` 可重新生成。
 
@@ -31,11 +31,12 @@ macOS 使用 `.app` 运行，以便托盘、窗口激活和原生图标正确工
 
 点击右上角设置图标、按 `⌘,` / `Ctrl+,`，或通过托盘「设置…」进入独立设置页：
 
-- **快捷键与终端**：修改两个全局快捷键和终端应用。
+- **快捷键**：通过按键选择框配置呼出、终端和任意应用的全局组合键，例如 `[Cmd] + [K]`。点击「＋」增加格子，点击「×」移除格子，支持搜索按键；每组为一个普通按键加修饰键，最多 5 格，重复或不完整的组合会提示。应用可以从已安装列表搜索选择，或浏览路径。应用快捷键支持编辑、移除和停用；终端快捷键清空可停用。选择过程不监听组合键，保存设置后生效。
+- **打开方式**：按扩展名指定应用（例如 `md` → Visual Studio Code），`folder` 指定文件夹应用，`*` 指定其余文件。规则仅用于 Starter 打开搜索结果；移除规则后恢复系统默认。精确扩展名优先于 `*`。
 - **外观**：Catppuccin Mocha、Everforest、Gruvbox、Catppuccin Latte；点选预览，取消恢复，保存持久化。可设置已安装的等宽字体。
 - **搜索目录**：支持原生文件夹选择器和手工输入路径，一行一个，支持 `~`。
 - **应用别名**：填写应用名称和逗号分隔的别名，点击添加或更新；可移除。
-- **更新**：默认自动检查正式版本，可关闭或立即检查。启动时及持续运行期间每 24 小时检查 GitHub Release；发现新版后提供下载页面。
+- **更新**：默认自动检查正式版本，可关闭或立即检查。启动时及持续运行期间每 24 小时检查 GitHub Release；发现新版后点击「下载并更新」，自动下载、校验、安装并重启；显示下载进度，下载期间可以取消，失败可以重试。macOS 按运行架构选择 DMG 并替换当前 `.app`；Windows 安装版使用 MSI，便携版使用 ZIP。详见 [自动更新设计](docs/UPDATING.md)。
 
 保存时验证热键、目录和必填项；热键注册失败保留原设置。改动立即应用，无须重启。配置文件入口保留给高级编辑，手工修改后从托盘重新加载。
 
@@ -60,13 +61,17 @@ macOS 使用 `.app` 运行，以便托盘、窗口激活和原生图标正确工
 
 - `src/ui.rs`：启动器界面、键盘交互、结果列表。
 - `src/settings.rs`：设置页、校验和草稿；保存或取消后返回搜索。
+- `src/settings/hotkey_editor.rs`：分格选择组合键、增删格子、组合预览与校验。
 - `src/appearance.rs`：统一配色。深色配色参考 [Omarchy 官方主题](https://github.com/omacom/omarchy/tree/quattro/themes)，浅色来自 Catppuccin Latte。
 - `src/icons.rs`：后台读取系统应用/文件图标，按需加载，有界缓存；缺失时使用 Lucide 类型图标。额外图标仅嵌入实际使用的条目。
-- `src/platform.rs`：托盘、全局快捷键、打开/定位、窗口显示隐藏。
+- `src/platform.rs`：托盘、全局快捷键注册与事件路由、定位、窗口显示隐藏。
+- `src/hotkeys.rs`：组合键解析、重复校验、注册失败回滚。
+- `src/opening.rs`：打开规则与应用启动；macOS 使用 `open -a`，Windows 使用 ShellExecute（支持 `.lnk`）。
 - `src/search.rs`、`src/catalog.rs`：可独立测试的搜索和应用发现。
 - `src/worker.rs`：后台目录遍历、可取消搜索、80 ms 防抖、分批返回。
 - `src/config.rs`、`src/history.rs`：本地 TOML 配置和 JSON 使用记录。
-- `src/updates.rs`：后台检查 GitHub 正式版本，比较语义版本并报告更新状态。
+- `src/updates.rs`：正式版本检查、平台安装包选择、下载进度和 SHA-256 校验。
+- `src/updates/install.rs`：安装准备、独立更新助手、进程退出等待、替换与启动失败回滚。
 
 macOS 配置在 `~/Library/Application Support/starter/config.toml`，Windows 在 `%APPDATA%\starter\config.toml`。使用记录位于同目录 `usage.json`。更新检查只请求 GitHub 版本信息，不发送查询、目录、配置或使用记录。无遥测、网络索引或云端同步。
 
@@ -76,8 +81,12 @@ macOS 配置在 `~/Library/Application Support/starter/config.toml`，Windows �
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
+
+# macOS 更新助手的真实应用包测试（使用临时副本）
+bash scripts/bundle-macos.sh --debug
+python3 scripts/test-macos-updater.py
 ```
 
-已在当前 Apple Silicon macOS 环境编译运行，并检查原生界面。Windows 代码及双平台 GitHub Actions 工作流已准备；当前 Mac 上交叉检查被依赖的 Windows 资源编译器 `llvm-rc` 缺失阻断，仍需 Windows 原生构建和运行验证。
+已在当前 Apple Silicon macOS 环境编译运行，验证原生设置界面、DMG 准备、更新助手替换与重启。测试覆盖校验失败、下载取消、安装/启动失败回滚、快捷键冲突恢复与焦点回归。新增 Windows 核心模块通过独立交叉编译检查；完整 Windows 交叉构建受本机 Windows SDK 和 `llvm-rc` 缺失阻断，MSI 自动更新仍需 Windows 原生运行验证。双平台 CI 继续运行格式、Clippy、测试和安装包检查。
 
 当前实现应用启动、文件/内容搜索、终端热键、主题、设置界面、收藏与使用次数排序、最近使用区域。浏览器书签、剪切板历史、计算器历史、半屏窗口管理尚未实现。

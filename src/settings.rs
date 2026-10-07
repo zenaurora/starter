@@ -1,18 +1,25 @@
+mod hotkey_editor;
+use hotkey_editor::HotkeyEditor;
+
 use crate::appearance;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     component::{
         ActiveTheme, Disableable, Sizable,
         button::{Button, ButtonVariants},
-        input::{Input, InputState, Textarea, TextareaState},
+        input::{Input, InputEvent, InputState, Textarea, TextareaState},
         switch::Switch,
     },
     prelude::FluentBuilder,
     *,
 };
-use starter::config::{Config, ThemeName, expand_home};
 use starter::updates::{self, Status as UpdateStatus};
-use std::{path::PathBuf, str::FromStr};
+use starter::{
+    catalog::Application,
+    config::{AppShortcut, Config, ThemeName, expand_home},
+    hotkeys, opening,
+};
+use std::path::PathBuf;
 
 pub enum Event {
     Save(Box<Config>),
@@ -20,12 +27,14 @@ pub enum Event {
     Close,
     OpenConfig,
     CheckUpdates,
-    OpenRelease(String),
+    InstallUpdate,
+    CancelUpdate,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     General,
+    Opening,
     Appearance,
     Search,
     Aliases,
@@ -36,32 +45,52 @@ pub struct Settings {
     draft: Config,
     tab: Tab,
     focus: FocusHandle,
-    launcher: Entity<InputState>,
-    terminal_key: Entity<InputState>,
+    launcher: Entity<HotkeyEditor>,
+    terminal_key: Entity<HotkeyEditor>,
     terminal: Entity<InputState>,
     font: Entity<InputState>,
     roots: Entity<TextareaState>,
     alias_app: Entity<InputState>,
     alias_names: Entity<InputState>,
+    shortcut_key: Entity<HotkeyEditor>,
+    shortcut_app: Entity<InputState>,
+    rule: Entity<InputState>,
+    rule_app: Entity<InputState>,
+    apps: Vec<Application>,
+    picker: Option<Entity<InputState>>,
+    app_search: Entity<InputState>,
+    editing_shortcut: Option<usize>,
+    _subscriptions: Vec<Subscription>,
     pub error: Option<String>,
     pub update_status: UpdateStatus,
+    pub can_install: bool,
     _tasks: Vec<Task<()>>,
 }
 
 impl EventEmitter<Event> for Settings {}
 
 impl Settings {
+    pub fn set_apps(&mut self, apps: Vec<Application>, cx: &mut Context<Self>) {
+        self.apps = apps;
+        cx.notify();
+    }
+
     pub fn show_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = Tab::Updates;
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    pub fn new(config: &Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        config: &Config,
+        apps: Vec<Application>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let launcher =
-            cx.new(|cx| InputState::new(window, cx).default_value(config.launcher_hotkey.clone()));
+            cx.new(|cx| HotkeyEditor::new("呼出快捷键", &config.launcher_hotkey, window, cx));
         let terminal_key =
-            cx.new(|cx| InputState::new(window, cx).default_value(config.terminal_hotkey.clone()));
+            cx.new(|cx| HotkeyEditor::new("终端直达快捷键", &config.terminal_hotkey, window, cx));
         let terminal =
             cx.new(|cx| InputState::new(window, cx).default_value(config.terminal.clone()));
         let font =
@@ -80,11 +109,23 @@ impl Settings {
         });
         let alias_app = cx.new(|cx| InputState::new(window, cx).placeholder("例如 Terminal"));
         let alias_names = cx.new(|cx| InputState::new(window, cx).placeholder("term, 终端"));
-        launcher.update(cx, |input, cx| input.focus(window, cx));
+        let shortcut_key = cx.new(|cx| HotkeyEditor::new("应用快捷键", "", window, cx));
+        let shortcut_app =
+            cx.new(|cx| InputState::new(window, cx).placeholder("选择应用，或填写名称/路径"));
+        let rule = cx.new(|cx| InputState::new(window, cx).placeholder("md / pdf / folder / *"));
+        let rule_app = cx.new(|cx| InputState::new(window, cx).placeholder("选择用于打开的应用"));
+        let app_search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索已安装应用"));
+        let subscription = cx.subscribe(&app_search, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
         Self {
             draft: config.clone(),
             tab: Tab::General,
-            focus: cx.focus_handle(),
+            focus,
             launcher,
             terminal_key,
             terminal,
@@ -92,8 +133,18 @@ impl Settings {
             roots,
             alias_app,
             alias_names,
+            shortcut_key,
+            shortcut_app,
+            rule,
+            rule_app,
+            apps,
+            picker: None,
+            app_search,
+            editing_shortcut: None,
+            _subscriptions: vec![subscription],
             error: None,
             update_status: UpdateStatus::Idle,
+            can_install: false,
             _tasks: Vec::new(),
         }
     }
@@ -111,13 +162,25 @@ impl Settings {
 
     fn values(&self, cx: &App) -> anyhow::Result<Config> {
         let mut config = self.draft.clone();
-        config.launcher_hotkey = self.launcher.read(cx).value().trim().to_string();
-        config.terminal_hotkey = self.terminal_key.read(cx).value().trim().to_string();
-        let launcher = global_hotkey::hotkey::HotKey::from_str(&config.launcher_hotkey)?;
-        let terminal = global_hotkey::hotkey::HotKey::from_str(&config.terminal_hotkey)?;
-        anyhow::ensure!(launcher.id() != terminal.id(), "两个快捷键不能相同");
+        config.launcher_hotkey = self.launcher.read(cx).value(cx)?;
+        config.terminal_hotkey = self.terminal_key.read(cx).value(cx)?;
         config.terminal = self.terminal.read(cx).value().trim().to_string();
         anyhow::ensure!(!config.terminal.is_empty(), "请填写终端应用");
+        if let Some(shortcut) = self.pending_shortcut(cx)? {
+            if let Some(i) = self.editing_shortcut {
+                config.shortcuts[i] = shortcut;
+            } else {
+                config.shortcuts.push(shortcut);
+            }
+        }
+        let rule = self.rule.read(cx).value();
+        let app = self.rule_app.read(cx).value();
+        if !rule.trim().is_empty() || !app.trim().is_empty() {
+            let rule = opening::normalize_rule(&rule)?;
+            anyhow::ensure!(!app.trim().is_empty(), "请选择打开应用");
+            config.open_with.insert(rule, app.trim().to_string());
+        }
+        hotkeys::bindings(&config)?;
         config.monospace_font = self.font.read(cx).value().trim().to_string();
         anyhow::ensure!(!config.monospace_font.is_empty(), "请填写等宽字体名称");
         config.search_roots = self
@@ -199,12 +262,14 @@ impl Settings {
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let composing = [
-            &self.launcher,
-            &self.terminal_key,
             &self.terminal,
             &self.font,
             &self.alias_app,
             &self.alias_names,
+            &self.shortcut_app,
+            &self.rule,
+            &self.rule_app,
+            &self.app_search,
         ]
         .into_iter()
         .any(|input| {
@@ -218,7 +283,11 @@ impl Settings {
             return;
         }
         if event.keystroke.key == "escape" {
-            cx.emit(Event::Close);
+            if self.picker.take().is_some() {
+                cx.notify();
+            } else {
+                cx.emit(Event::Close);
+            }
             cx.stop_propagation();
         } else if event.keystroke.key == "s"
             && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
@@ -226,6 +295,225 @@ impl Settings {
             self.save(cx);
             cx.stop_propagation();
         }
+    }
+
+    fn pending_shortcut(&self, cx: &App) -> anyhow::Result<Option<AppShortcut>> {
+        let hotkey = self.shortcut_key.read(cx).value(cx)?;
+        let application = self.shortcut_app.read(cx).value().trim().to_string();
+        if hotkey.is_empty() && application.is_empty() && self.editing_shortcut.is_none() {
+            return Ok(None);
+        }
+        anyhow::ensure!(!application.is_empty(), "请选择快捷键要打开的应用");
+        let key = hotkeys::parse(&hotkey)?;
+        anyhow::ensure!(!key.mods.is_empty(), "全局快捷键必须包含修饰键");
+        let enabled = self
+            .editing_shortcut
+            .is_none_or(|i| self.draft.shortcuts[i].enabled);
+        Ok(Some(AppShortcut {
+            hotkey,
+            application,
+            enabled,
+        }))
+    }
+
+    fn add_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shortcut = match self.pending_shortcut(cx) {
+            Ok(Some(shortcut)) => shortcut,
+            Ok(None) => {
+                self.error = Some("请选择快捷键和应用".into());
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.error = Some(format!("{error:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        let mut config = self.draft.clone();
+        let keys = self.launcher.read(cx).value(cx).and_then(|launcher| {
+            self.terminal_key
+                .read(cx)
+                .value(cx)
+                .map(|terminal| (launcher, terminal))
+        });
+        let (launcher, terminal) = match keys {
+            Ok(keys) => keys,
+            Err(error) => {
+                self.error = Some(format!("{error:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        config.launcher_hotkey = launcher;
+        config.terminal_hotkey = terminal;
+        if let Some(i) = self.editing_shortcut {
+            config.shortcuts[i] = shortcut;
+        } else {
+            config.shortcuts.push(shortcut);
+        }
+        match hotkeys::bindings(&config) {
+            Ok(_) => {
+                self.draft.shortcuts = config.shortcuts;
+                self.editing_shortcut = None;
+                self.shortcut_key
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.shortcut_app
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("{error:#}")),
+        }
+        cx.notify();
+    }
+
+    fn add_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let result = (|| -> anyhow::Result<()> {
+            let rule = opening::normalize_rule(&self.rule.read(cx).value())?;
+            let app = self.rule_app.read(cx).value().trim().to_string();
+            anyhow::ensure!(!app.is_empty(), "请选择打开应用");
+            self.draft.open_with.insert(rule, app);
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.rule
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.rule_app
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+            }
+            Err(error) => self.error = Some(format!("{error:#}")),
+        }
+        cx.notify();
+    }
+
+    fn choose_app(
+        &mut self,
+        input: Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.picker = Some(input);
+        self.app_search.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn browse_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.picker.clone() else {
+            return;
+        };
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: cfg!(target_os = "macos"),
+            multiple: false,
+            prompt: Some("选择应用或可执行文件".into()),
+        });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = paths.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(Ok(Some(paths))) if !paths.is_empty() => {
+                        input.update(cx, |input, cx| {
+                            input.set_value(paths[0].display().to_string(), window, cx)
+                        });
+                        this.picker = None;
+                    }
+                    Ok(Err(error)) => this.error = Some(format!("选择失败：{error}")),
+                    Err(error) => this.error = Some(format!("选择失败：{error}")),
+                    _ => {}
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn app_field(
+        &self,
+        label: &'static str,
+        input: &Entity<InputState>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let target = input.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(label)
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(Input::new(input).aria_label(label))
+                    .child(Button::new(label).label("选择应用").on_click(cx.listener(
+                        move |this, _, window, cx| this.choose_app(target.clone(), window, cx),
+                    ))),
+            )
+            .into_any_element()
+    }
+
+    fn picker_content(&self, cx: &Context<Self>) -> AnyElement {
+        let Some(target) = self.picker.clone() else {
+            return div().into_any_element();
+        };
+        let query = self.app_search.read(cx).value().to_lowercase();
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(Input::new(&self.app_search).aria_label("搜索已安装应用"));
+        for app in self
+            .apps
+            .iter()
+            .filter(|app| {
+                app.name.to_lowercase().contains(&query)
+                    || app
+                        .aliases
+                        .iter()
+                        .any(|a| a.to_lowercase().contains(&query))
+            })
+            .take(8)
+        {
+            let path = app.path.display().to_string();
+            let input = target.clone();
+            list = list.child(
+                Button::new(app.id.clone())
+                    .label(app.name.clone())
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        input.update(cx, |input, cx| input.set_value(path.clone(), window, cx));
+                        this.picker = None;
+                        cx.notify();
+                    })),
+            );
+        }
+        list.child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    Button::new("browse-app")
+                        .label("浏览…")
+                        .on_click(cx.listener(|this, _, window, cx| this.browse_app(window, cx))),
+                )
+                .child(
+                    Button::new("close-picker")
+                        .label("收起")
+                        .ghost()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.picker = None;
+                            cx.notify();
+                        })),
+                ),
+        )
+        .into_any_element()
     }
 
     fn field(label: &'static str, help: &'static str, input: &Entity<InputState>) -> AnyElement {
@@ -246,6 +534,9 @@ impl Settings {
     }
 
     fn content(&self, cx: &Context<Self>) -> AnyElement {
+        if self.picker.is_some() {
+            return self.picker_content(cx);
+        }
         let theme = cx.theme();
         let body = div().w_full().flex().flex_col().gap_5();
         match self.tab {
@@ -263,21 +554,76 @@ impl Settings {
                     .child("启动时及运行期间每 24 小时检查一次。保存设置后生效。"))
                 .child(div().text_size(px(12.)).child(self.update_status.label()))
                 .child(Button::new("check-updates").label("立即检查")
-                    .disabled(self.update_status == UpdateStatus::Checking)
+                    .disabled(self.update_status.busy())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(Event::CheckUpdates))))
-                .when_some(match &self.update_status {
-                    UpdateStatus::Available { url, .. } => Some(url.clone()),
-                    _ => None,
-                }, |body, url| body.child(Button::new("open-release").label("查看并下载新版本")
-                    .primary().on_click(cx.listener(move |_, _, _, cx| cx.emit(Event::OpenRelease(url.clone()))))))
+                .when(self.can_install && !self.update_status.busy(), |body| body.child(Button::new("install-update").label("下载并更新").primary()
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(Event::InstallUpdate)))))
+                .when(matches!(self.update_status, UpdateStatus::Downloading { .. }), |body| body.child(Button::new("cancel-update").label("取消下载")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(Event::CancelUpdate)))))
                 .child(div().text_size(px(11.)).text_color(theme.muted_foreground)
-                    .child("通过 GitHub 检查正式版本，下载后使用安装包更新。"))
+                    .child("点击更新后自动下载、校验、安装并重新启动。配置和使用记录会保留。"))
                 .into_any_element(),
-            Tab::General => body
-                .child(Self::field("呼出快捷键", "格式：Alt+Space、Ctrl+Space、Super+Space", &self.launcher))
-                .child(Self::field("终端直达快捷键", "在其他应用中也能直接打开终端", &self.terminal_key))
-                .child(Self::field("终端应用", if cfg!(target_os = "macos") { "填写应用名称，例如 Terminal、kitty、Ghostty" } else { "填写可执行文件，例如 wt.exe，或完整路径" }, &self.terminal))
-                .into_any_element(),
+            Tab::General => {
+                let mut list = div().flex().flex_col().gap_2();
+                for (i, shortcut) in self.draft.shortcuts.iter().enumerate() {
+                    list = list.child(div().flex().items_center().gap_2().py_2().border_b_1().border_color(theme.border)
+                        .child(Switch::new(("shortcut-enabled", i)).checked(shortcut.enabled).on_change(cx.listener(move |this, checked, _, cx| { this.draft.shortcuts[i].enabled = *checked; cx.notify(); })))
+                        .child(div().flex_1().min_w_0().flex().flex_col().gap_1().child(shortcut.hotkey.clone()).child(div().text_size(px(11.)).text_ellipsis().child(shortcut.application.clone())))
+                        .child(Button::new(("edit-shortcut", i)).label("编辑").ghost().small().on_click(cx.listener(move |this, _, window, cx| {
+                            let shortcut = &this.draft.shortcuts[i];
+                            let key = shortcut.hotkey.clone(); let app = shortcut.application.clone();
+                            this.shortcut_key.update(cx, |input, cx| input.set_value(&key, window, cx));
+                            this.shortcut_app.update(cx, |input, cx| input.set_value(app, window, cx));
+                            this.editing_shortcut = Some(i); cx.notify();
+                        })))
+                        .child(Button::new(("remove-shortcut", i)).icon(IconName::X).ghost().small().on_click(cx.listener(move |this, _, window, cx| {
+                            this.draft.shortcuts.remove(i);
+                            if this.editing_shortcut.take().is_some() {
+                                this.shortcut_key.update(cx, |input, cx| input.set_value("", window, cx));
+                                this.shortcut_app.update(cx, |input, cx| input.set_value("", window, cx));
+                            }
+                            cx.notify();
+                        }))));
+                }
+                body.gap_3()
+                    .child(self.launcher.clone())
+                    .child(self.terminal_key.clone())
+                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child("点击格子选择按键，＋ 增加格子，× 移除。组合由一个普通按键和修饰键组成，最多 5 格。终端快捷键清空可停用。"))
+                    .child(self.app_field("终端应用", &self.terminal, cx))
+                    .child(div().mt_3().font_weight(FontWeight::MEDIUM).child("打开应用的全局快捷键"))
+                    .child(list)
+                    .child(self.shortcut_key.clone())
+                    .child(self.app_field("目标应用", &self.shortcut_app, cx))
+                    .child(Button::new("add-shortcut").label(if self.editing_shortcut.is_some() { "更新快捷键" } else { "添加快捷键" }).on_click(cx.listener(|this, _, window, cx| this.add_shortcut(window, cx))))
+                    .child(self.picker_content(cx))
+                    .into_any_element()
+            }
+            Tab::Opening => {
+                let mut list = div().flex().flex_col().gap_2();
+                for (rule, application) in &self.draft.open_with {
+                    let edit_rule = rule.clone(); let edit_app = application.clone(); let remove_rule = rule.clone();
+                    list = list.child(div().flex().items_center().gap_2().py_2().border_b_1().border_color(theme.border)
+                        .child(div().w(px(65.)).child(rule.clone()))
+                        .child(div().flex_1().min_w_0().text_ellipsis().child(application.clone()))
+                        .child(Button::new(format!("edit-{rule}")).label("编辑").ghost().small().on_click(cx.listener(move |this, _, window, cx| {
+                            this.rule.update(cx, |input, cx| input.set_value(edit_rule.clone(), window, cx));
+                            this.rule_app.update(cx, |input, cx| input.set_value(edit_app.clone(), window, cx)); cx.notify();
+                        })))
+                        .child(Button::new(format!("remove-{rule}")).icon(IconName::X).ghost().small().on_click(cx.listener(move |this, _, window, cx| {
+                            this.draft.open_with.remove(&remove_rule);
+                            if opening::normalize_rule(&this.rule.read(cx).value()).is_ok_and(|rule| rule == remove_rule) {
+                                this.rule.update(cx, |input, cx| input.set_value("", window, cx));
+                                this.rule_app.update(cx, |input, cx| input.set_value("", window, cx));
+                            }
+                            cx.notify();
+                        }))));
+                }
+                body.gap_3().child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("设置从 Starter 打开文件时使用的应用。没有规则时使用系统默认；移除规则即可恢复。"))
+                    .child(list).child(Self::field("文件类型", "例如 md、pdf；folder 表示文件夹，* 表示其余文件", &self.rule))
+                    .child(self.app_field("打开应用", &self.rule_app, cx))
+                    .child(Button::new("add-rule").label("添加或更新规则").on_click(cx.listener(|this, _, window, cx| this.add_rule(window, cx))))
+                    .child(self.picker_content(cx)).into_any_element()
+            }
             Tab::Search => body.gap_3()
                 .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("搜索目录"))
                 .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("只搜索这里列出的目录。每行一个路径，支持 ~。"))
@@ -331,14 +677,16 @@ impl Render for Settings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let tabs = [
-            (Tab::General, IconName::Keyboard, "快捷键与终端"),
+            (Tab::General, IconName::Keyboard, "快捷键"),
+            (Tab::Opening, IconName::AppWindow, "打开方式"),
             (Tab::Appearance, IconName::Palette, "外观"),
             (Tab::Search, IconName::FolderSearch, "搜索目录"),
             (Tab::Aliases, IconName::Tag, "应用别名"),
             (Tab::Updates, IconName::RefreshCw, "更新"),
         ];
         let titles = match self.tab {
-            Tab::General => ("快捷键与终端", "把常用动作缩短到一次按键。"),
+            Tab::Opening => ("打开方式", "为文件和文件夹指定常用应用。"),
+            Tab::General => ("快捷键", "把常用动作缩短到一次按键。"),
             Tab::Appearance => ("外观", "熟悉的编辑器配色，安静的桌面入口。"),
             Tab::Search => ("搜索目录", "限定搜索范围，保持轻量。"),
             Tab::Aliases => ("应用别名", "用你习惯的名字打开应用。"),
@@ -351,7 +699,7 @@ impl Render for Settings {
             .bg(theme.background)
             .text_color(theme.foreground)
             .track_focus(&self.focus)
-            .capture_key_down(cx.listener(Self::key_down))
+            .on_key_down(cx.listener(Self::key_down))
             .child(
                 div()
                     .h(px(64.))
@@ -406,6 +754,7 @@ impl Render for Settings {
                                     .w_full()
                                     .when(self.tab == tab, |b| b.bg(theme.accent))
                                     .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.picker = None;
                                         this.tab = tab;
                                         window.focus(&this.focus, cx);
                                         this.error = None;
@@ -494,5 +843,97 @@ impl Render for Settings {
                             ),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+    use gpui_kit::base::Root;
+
+    fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Settings>) {
+        cx.update(gpui_kit::init);
+        let (handle, settings) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(720.), px(560.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| Settings::new(&Config::default(), Vec::new(), window, cx)),
+            )
+            .unwrap()
+        });
+        (handle.downcast().unwrap(), settings)
+    }
+
+    #[gpui_kit::test]
+    fn save_includes_pending_rule_and_shortcut_without_duplicating_added_rows(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, settings) = fixture(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            settings.update(cx, |this, cx| {
+                this.shortcut_key
+                    .update(cx, |input, cx| input.set_value("Cmd+K", window, cx));
+                this.shortcut_app
+                    .update(cx, |input, cx| input.set_value("Editor", window, cx));
+                this.rule
+                    .update(cx, |input, cx| input.set_value(".MD", window, cx));
+                this.rule_app
+                    .update(cx, |input, cx| input.set_value("Editor", window, cx));
+                let saved = this.values(cx).unwrap();
+                assert_eq!(saved.shortcuts.len(), 1);
+                assert_eq!(saved.open_with["md"], "Editor");
+                assert!(this.draft.shortcuts.is_empty());
+                assert!(
+                    this.draft.open_with.is_empty(),
+                    "cancel must still discard pending inputs"
+                );
+                this.add_shortcut(window, cx);
+                this.add_rule(window, cx);
+                let saved = this.values(cx).unwrap();
+                assert_eq!(saved.shortcuts.len(), 1);
+                assert_eq!(saved.open_with.len(), 1);
+                this.shortcut_key.update(cx, |input, cx| {
+                    input.set_value(&saved.launcher_hotkey, window, cx)
+                });
+                this.shortcut_app
+                    .update(cx, |input, cx| input.set_value("Duplicate", window, cx));
+                assert!(
+                    this.values(cx).is_err(),
+                    "save must reject conflicts with built-in keys"
+                );
+            })
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn editing_a_disabled_shortcut_preserves_its_disabled_state(cx: &mut TestAppContext) {
+        let (handle, settings) = fixture(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            settings.update(cx, |this, cx| {
+                this.draft.shortcuts.push(AppShortcut {
+                    hotkey: "Cmd+K".into(),
+                    application: "Editor".into(),
+                    enabled: false,
+                });
+                this.editing_shortcut = Some(0);
+                this.shortcut_key
+                    .update(cx, |input, cx| input.set_value("Cmd+L", window, cx));
+                this.shortcut_app
+                    .update(cx, |input, cx| input.set_value("Browser", window, cx));
+                let saved = this.values(cx).unwrap();
+                assert_eq!(saved.shortcuts.len(), 1);
+                assert_eq!(saved.shortcuts[0].application, "Browser");
+                assert!(!saved.shortcuts[0].enabled);
+            })
+        })
+        .unwrap();
     }
 }

@@ -1,9 +1,15 @@
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+#[cfg(target_os = "macos")]
+use anyhow::bail;
 use async_channel::{Receiver, Sender};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use gpui_kit::{App, Window};
-use starter::config::Config;
-use std::{path::Path, process::Command, str::FromStr};
+use starter::{
+    config::Config,
+    hotkeys::{self, Action},
+    opening,
+};
+use std::{path::Path, process::Command};
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -13,6 +19,7 @@ use tray_icon::{
 pub enum Event {
     Toggle,
     Terminal,
+    Application(String),
     OpenSettings,
     OpenConfig,
     Reload,
@@ -23,7 +30,7 @@ pub enum Event {
 /// Own OS resources on GPUI's main thread, including when the window is hidden.
 pub struct Shell {
     manager: GlobalHotKeyManager,
-    hotkeys: Vec<HotKey>,
+    bindings: Vec<(HotKey, Action)>,
     _tray: TrayIcon,
 }
 
@@ -82,7 +89,7 @@ impl Shell {
         }));
         let mut shell = Self {
             manager,
-            hotkeys: Vec::new(),
+            bindings: Vec::new(),
             _tray: tray,
         };
         let warning = shell.rebind(config).err().map(|e| {
@@ -96,47 +103,43 @@ impl Shell {
     }
 
     pub fn event_for(&self, id: u32) -> Option<Event> {
-        match self.hotkeys.iter().position(|key| key.id() == id) {
-            Some(0) => Some(Event::Toggle),
-            Some(1) => Some(Event::Terminal),
-            _ => None,
-        }
+        self.bindings
+            .iter()
+            .find(|(key, _)| key.id() == id)
+            .map(|(_, action)| match action {
+                Action::Toggle => Event::Toggle,
+                Action::Terminal => Event::Terminal,
+                Action::Application(app) => Event::Application(app.clone()),
+            })
     }
 
     pub fn rebind(&mut self, config: &Config) -> Result<()> {
-        let next = vec![
-            HotKey::from_str(&config.launcher_hotkey)?,
-            HotKey::from_str(&config.terminal_hotkey)?,
-        ];
-        if next[0].id() == next[1].id() {
-            bail!("呼出与终端快捷键不能相同");
-        }
-        let mut added = Vec::new();
-        for hotkey in &next {
-            if self.hotkeys.contains(hotkey) {
-                continue;
-            }
-            if let Err(error) = self.manager.register(*hotkey) {
-                for key in added {
-                    let _ = self.manager.unregister(key);
-                }
-                return Err(error).context("无法注册快捷键，原有绑定已保留");
-            }
-            added.push(*hotkey);
-        }
-        for old in &self.hotkeys {
-            if !next.contains(old) {
-                self.manager.unregister(*old)?;
-            }
-        }
-        self.hotkeys = next;
+        let next = hotkeys::bindings(config)?;
+        self.change_keys(
+            &self.keys(),
+            &next.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+        )?;
+        self.bindings = next;
         Ok(())
+    }
+
+    fn keys(&self) -> Vec<HotKey> {
+        self.bindings.iter().map(|(key, _)| *key).collect()
+    }
+
+    fn change_keys(&self, old: &[HotKey], next: &[HotKey]) -> Result<()> {
+        hotkeys::reconcile(
+            old,
+            next,
+            |key| self.manager.register(key).map_err(Into::into),
+            |key| self.manager.unregister(key).map_err(Into::into),
+        )
     }
 }
 
 impl Drop for Shell {
     fn drop(&mut self) {
-        let _ = self.manager.unregister_all(&self.hotkeys);
+        let _ = self.manager.unregister_all(&self.keys());
     }
 }
 
@@ -152,32 +155,11 @@ fn tray_icon() -> Result<Icon> {
 }
 
 pub fn open_target(path: &Path) -> Result<()> {
-    open::that(path).with_context(|| format!("无法打开 {}", path.display()))
+    opening::open(path, None)
 }
 
 pub fn open_terminal(config: &Config) -> Result<()> {
-    if config.terminal.trim().is_empty() {
-        bail!("请先配置终端应用");
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let status = Command::new("/usr/bin/open")
-            .arg("-a")
-            .arg(&config.terminal)
-            .status()?;
-        if !status.success() {
-            bail!("未能打开终端 {}，请检查应用名称", config.terminal);
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new(&config.terminal)
-            .spawn()
-            .with_context(|| format!("无法运行 {}", config.terminal))?;
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    Command::new(&config.terminal).spawn()?;
-    Ok(())
+    opening::launch(&config.terminal)
 }
 
 pub fn reveal(path: &Path) -> Result<()> {

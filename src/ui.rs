@@ -22,6 +22,7 @@ use starter::{
     catalog::Catalog,
     config::{self, Config},
     history::History,
+    opening,
     search::{self, Candidate, Kind, Mode, Query},
     updates::{self, Status as UpdateStatus},
 };
@@ -58,6 +59,8 @@ pub struct Launcher {
     visible: bool,
     searching: bool,
     update_status: UpdateStatus,
+    update_release: Option<(String, Vec<updates::Asset>)>,
+    update_cancelled: Arc<AtomicBool>,
     _subscriptions: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
 }
@@ -194,6 +197,15 @@ impl Launcher {
         });
 
         // Create error dialog if there were startup errors
+        let update_report = updates::take_report();
+        if let Some(UpdateStatus::Failed(problem)) = &update_report {
+            let message = format!("上次更新失败：{problem}\n\n已尝试恢复原应用。请在设置中重试。");
+            if let Some(error) = &mut error {
+                error.push_str(&format!("\n\n{message}"));
+            } else {
+                error = Some(message);
+            }
+        }
         let mut error_dialog = None;
         let mut error_dialog_subscription = None;
         if let Some(message) = error {
@@ -235,7 +247,9 @@ impl Launcher {
             status: "正在读取应用列表…".into(),
             visible: true,
             searching: false,
-            update_status: UpdateStatus::Idle,
+            update_status: update_report.unwrap_or_default(),
+            update_release: None,
+            update_cancelled: Arc::new(AtomicBool::new(false)),
             _subscriptions: subscriptions,
             _tasks: tasks,
         };
@@ -284,7 +298,7 @@ impl Launcher {
     }
 
     fn check_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.update_status == UpdateStatus::Checking {
+        if self.update_status.busy() {
             return;
         }
         self.set_update_status(UpdateStatus::Checking, cx);
@@ -298,9 +312,63 @@ impl Launcher {
         }));
     }
 
+    fn install_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.update_status.busy() {
+            return;
+        }
+        let Some((version, assets)) = self.update_release.clone() else {
+            return;
+        };
+        self.update_cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = self.update_cancelled.clone();
+        let (sender, receiver) = async_channel::unbounded();
+        self.set_update_status(
+            UpdateStatus::Downloading {
+                received: 0,
+                total: 0,
+            },
+            cx,
+        );
+        let job = cx.background_executor().spawn(async move {
+            updates::prepare_and_launch(&version, &assets, &cancel, |status| {
+                let _ = sender.try_send(status);
+            })
+        });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            while let Ok(status) = receiver.recv().await {
+                if this
+                    .update_in(cx, |this, _, cx| this.set_update_status(status, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let result = job.await;
+            let _ = this.update_in(cx, |this, _, cx| match result {
+                Ok(()) => cx.quit(),
+                Err(error) => {
+                    let status = if this.update_cancelled.load(Ordering::Relaxed) {
+                        UpdateStatus::Cancelled
+                    } else {
+                        UpdateStatus::Failed(format!("{error:#}"))
+                    };
+                    this.set_update_status(status, cx);
+                }
+            });
+        }));
+    }
+
     fn set_update_status(&mut self, status: UpdateStatus, cx: &mut Context<Self>) {
+        match &status {
+            UpdateStatus::Available {
+                version, assets, ..
+            } => self.update_release = Some((version.clone(), assets.clone())),
+            UpdateStatus::UpToDate | UpdateStatus::Checking => self.update_release = None,
+            _ => {}
+        }
         if let Some(settings) = &self.settings {
             settings.update(cx, |settings, cx| {
+                settings.can_install = self.update_release.is_some();
                 settings.update_status = status.clone();
                 cx.notify();
             });
@@ -376,6 +444,11 @@ impl Launcher {
             } if generation == self.catalog_generation => {
                 self.candidates = search::app_candidates(&catalog.apps, &self.config);
                 self.catalog = catalog;
+                if let Some(settings) = &self.settings {
+                    settings.update(cx, |settings, cx| {
+                        settings.set_apps(self.catalog.apps.clone(), cx)
+                    });
+                }
                 // Only the app list reads these candidates. Re-running `search` while
                 // a Files/Content query is in flight would cancel the running disk
                 // scan, clear the streamed results, reset the selection and replay the
@@ -419,6 +492,13 @@ impl Launcher {
                     self.show(window, cx);
                 }
             },
+            ShellEvent::Application(application) => match opening::launch(&application) {
+                Ok(()) => self.hide(window, cx),
+                Err(problem) => {
+                    self.status = format!("应用打开失败：{problem:#}");
+                    self.show(window, cx);
+                }
+            },
             ShellEvent::OpenSettings => self.open_settings(window, cx),
             ShellEvent::OpenConfig => {
                 if let Err(problem) = platform::open_target(&self.config_path) {
@@ -436,6 +516,7 @@ impl Launcher {
                     Ok(config) => {
                         appearance::apply(config.theme, &config, window, cx);
                         self.config = config;
+                        self.close_settings(window, cx);
                         self.settings = None;
                         self.settings_subscription = None;
                         self.status = "配置已重新加载".into();
@@ -480,6 +561,9 @@ impl Launcher {
         if self.shell.is_none() {
             return;
         }
+        if self.settings.is_some() {
+            self.close_settings(window, cx);
+        }
         self.visible = false;
         self.cancelled.store(true, Ordering::Relaxed);
         platform::hide(window, cx);
@@ -489,7 +573,16 @@ impl Launcher {
         let Some(candidate) = self.results.get(self.selected) else {
             return;
         };
-        match platform::open_target(&candidate.path) {
+        let app = if candidate.kind == Kind::App {
+            None
+        } else {
+            opening::application_for(
+                &candidate.path,
+                candidate.kind == Kind::Folder,
+                &self.config,
+            )
+        };
+        match opening::open(&candidate.path, app) {
             Ok(()) => {
                 if candidate.kind == Kind::App
                     && let Err(problem) = self.history.record(&candidate.id)
@@ -617,8 +710,10 @@ impl Launcher {
         if self.settings.is_some() {
             return;
         }
-        let settings = cx.new(|cx| Settings::new(&self.config, window, cx));
+        let settings =
+            cx.new(|cx| Settings::new(&self.config, self.catalog.apps.clone(), window, cx));
         settings.update(cx, |settings, _| {
+            settings.can_install = self.update_release.is_some();
             settings.update_status = self.update_status.clone()
         });
         self.settings_subscription = Some(cx.subscribe_in(
@@ -628,16 +723,9 @@ impl Launcher {
                 settings::Event::Close => this.close_settings(window, cx),
                 settings::Event::OpenConfig => this.shell_event(ShellEvent::OpenConfig, window, cx),
                 settings::Event::CheckUpdates => this.check_updates(window, cx),
-                settings::Event::OpenRelease(url) => {
-                    if let Err(error) = open::that(url) {
-                        this.status = format!("无法打开下载页面：{error}");
-                        if let Some(settings) = &this.settings {
-                            settings.update(cx, |settings, cx| {
-                                settings.error = Some(this.status.clone());
-                                cx.notify();
-                            });
-                        }
-                    }
+                settings::Event::InstallUpdate => this.install_update(window, cx),
+                settings::Event::CancelUpdate => {
+                    this.update_cancelled.store(true, Ordering::Relaxed);
                 }
                 settings::Event::Preview(theme) => {
                     appearance::apply(*theme, &this.config, window, cx)
@@ -976,6 +1064,7 @@ impl Launcher {
 impl Drop for Launcher {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Relaxed);
+        self.update_cancelled.store(true, Ordering::Relaxed);
     }
 }
 

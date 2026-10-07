@@ -61,6 +61,8 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         visible: true,
                         searching: false,
                         update_status: UpdateStatus::Idle,
+                        update_release: None,
+                        update_cancelled: Arc::new(AtomicBool::new(false)),
                         _subscriptions: vec![Launcher::observe_activation(window, cx)],
                         _tasks: Vec::new(),
                     }
@@ -193,6 +195,80 @@ fn settings_tab_switch_preserves_escape_and_returns_search_focus(cx: &mut TestAp
     cx.update_window(handle.into(), |_, window, cx| {
         assert!(launcher.read(cx).settings.is_none());
         assert!(launcher.read(cx).input.focus_handle(cx).is_focused(window));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn update_progress_prevents_parallel_checks_and_survives_settings_close(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.set_update_status(
+                UpdateStatus::Downloading {
+                    received: 10,
+                    total: 100,
+                },
+                cx,
+            );
+            this.check_updates(window, cx);
+            assert!(matches!(
+                this.update_status,
+                UpdateStatus::Downloading { .. }
+            ));
+            this.open_settings(window, cx);
+            assert_eq!(
+                this.settings.as_ref().unwrap().read(cx).update_status,
+                this.update_status
+            );
+            this.close_settings(window, cx);
+            assert!(this.update_status.busy());
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn escape_closes_key_dropdown_before_settings_and_cancel_preserves_keys(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    let original = launcher.read_with(cx, |this, _| this.config.launcher_hotkey.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| this.open_settings(window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window
+            .within("呼出快捷键")
+            .within(("key-slot", 0usize))
+            .click("input", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(
+            launcher.read(cx).settings.is_some(),
+            "Esc must first dismiss the dropdown"
+        );
+        assert_eq!(
+            window
+                .within("呼出快捷键")
+                .find(("key-slot", 0usize))
+                .expanded(),
+            Some(false)
+        );
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, _, cx| {
+        assert!(launcher.read(cx).settings.is_none());
+        assert_eq!(launcher.read(cx).config.launcher_hotkey, original);
     })
     .unwrap();
 }

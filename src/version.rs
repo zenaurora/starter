@@ -42,6 +42,7 @@ impl Version {
             pos += 1;
             Self::read_release_candidate(&version[pos..])?
         } else {
+            anyhow::ensure!(pos == bytes.len(), "unexpected version suffix");
             ReleaseCandidate {
                 rc: String::new(),
                 num: 0,
@@ -162,5 +163,25 @@ impl std::fmt::Display for Version {
                 self.major, self.minor, self.patch, self.rc.rc
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn version_requires_a_complete_valid_string() {
+        for invalid in [
+            "0.3.0junk",
+            "0.3.0/evil",
+            "0.3.0.1",
+            "0.3.0-rc",
+            "0.3.0-rc1junk",
+            "01.3.0",
+        ] {
+            assert!(Version::parse(invalid).is_err(), "{invalid}");
+        }
+        assert!(Version::parse("v0.3.0").unwrap() < Version::parse("0.10.0").unwrap());
+        assert!(Version::parse("0.3.0-rc2").unwrap() < Version::parse("0.3.0").unwrap());
     }
 }

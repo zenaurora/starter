@@ -16,6 +16,9 @@ pub struct Config {
     /// macOS: application name; Windows: executable path/name. Never a shell string.
     pub terminal: String,
     pub auto_check_updates: bool,
+    pub shortcuts: Vec<AppShortcut>,
+    /// Starter-only file associations: extensions without '.', '*' or 'folder'.
+    pub open_with: BTreeMap<String, String>,
     pub search_roots: Vec<PathBuf>,
     pub aliases: BTreeMap<String, Vec<String>>,
     pub favorites: BTreeSet<String>,
@@ -45,11 +48,25 @@ impl Default for Config {
             }
             .into(),
             auto_check_updates: true,
+            shortcuts: Vec::new(),
+            open_with: BTreeMap::new(),
             search_roots: Vec::new(),
             aliases: BTreeMap::new(),
             favorites: BTreeSet::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AppShortcut {
+    pub hotkey: String,
+    pub application: String,
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -153,8 +170,16 @@ mod tests {
         config
             .favorites
             .insert("app:/Applications/Terminal.app".into());
+        config.open_with.insert("md".into(), "Editor".into());
+        config.shortcuts.push(AppShortcut {
+            hotkey: "Cmd+K".into(),
+            application: "Editor".into(),
+            enabled: false,
+        });
         save(&path, &config).unwrap();
         let saved = read(&path).unwrap();
+        assert_eq!(saved.open_with, config.open_with);
+        assert_eq!(saved.shortcuts, config.shortcuts);
         assert_eq!(saved.theme, ThemeName::Everforest);
         assert!(!saved.auto_check_updates);
         assert_eq!(saved.search_roots, config.search_roots);
@@ -167,6 +192,8 @@ mod tests {
         assert_eq!(old.theme, ThemeName::Catppuccin);
         assert_eq!(old.terminal, "kitty");
         assert!(old.auto_check_updates);
+        assert!(old.open_with.is_empty());
+        assert!(old.shortcuts.is_empty());
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

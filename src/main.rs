@@ -40,6 +40,9 @@ impl AssetSource for AppAssets {
 }
 
 fn main() {
+    if starter::updates::run_helper() {
+        return;
+    }
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
         // 配置启动器窗口：固定尺寸、无标题栏的悬浮弹出窗口
@@ -63,6 +66,7 @@ fn main() {
             cx.new(|cx| ui::Launcher::new(window, cx))
         }) {
             Ok(_) => {
+                starter::updates::acknowledge_startup();
                 cx.set_activation_policy(ActivationPolicy::Accessory);
                 cx.activate(true);
             }
