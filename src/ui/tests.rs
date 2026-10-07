@@ -24,6 +24,7 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                     };
                     appearance::apply(config.theme, &config, window, cx);
                     let (worker, _) = async_channel::unbounded();
+                    let (clipboard_worker, _) = async_channel::unbounded();
                     let results = (0..3)
                         .map(|i| Candidate {
                             id: format!("file-{i}"),
@@ -48,6 +49,16 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                             std::env::temp_dir().join("starter-ui-test-history.json"),
                         ),
                         catalog: Catalog::default(),
+                        clipboard_entries: vec![],
+                        clipboard_root: std::env::temp_dir().join("starter-ui-test-clipboard"),
+                        clipboard_worker,
+                        clipboard_restore_pending: false,
+                        clipboard_hide_after_restore: false,
+                        clipboard_error: None,
+                        uninstall_targets: vec![],
+                        uninstall_confirmation: None,
+                        uninstall_busy: false,
+                        dialog_focus: cx.focus_handle(),
                         candidates: Vec::new(),
                         results,
                         selected: 0,
@@ -136,6 +147,7 @@ fn late_app_scan_leaves_an_in_flight_file_search_untouched(cx: &mut TestAppConte
                 worker::Event::Apps {
                     generation,
                     catalog: Catalog::default(),
+                    uninstall_targets: vec![],
                 },
                 cx,
             );
@@ -164,6 +176,7 @@ fn app_scan_refreshes_the_app_list(cx: &mut TestAppContext) {
                 worker::Event::Apps {
                     generation,
                     catalog: Catalog::default(),
+                    uninstall_targets: vec![],
                 },
                 cx,
             );
@@ -269,6 +282,84 @@ fn escape_closes_key_dropdown_before_settings_and_cancel_preserves_keys(cx: &mut
     cx.update_window(handle.into(), |_, _, cx| {
         assert!(launcher.read(cx).settings.is_none());
         assert_eq!(launcher.read(cx).config.launcher_hotkey, original);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn clipboard_and_uninstall_modes_do_not_require_disk_search_roots(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.input
+                .update(cx, |input, cx| input.set_value("/clip 文本", window, cx));
+            this.search(cx);
+            assert_eq!(this.query.mode, Mode::Clipboard);
+            assert!(!this.searching);
+            assert!(this.status.contains("条历史"));
+        });
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(launcher.read(cx).input.read(cx).value(), "/clip ");
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(launcher.read(cx).query.mode, Mode::Apps);
+        launcher.update(cx, |this, cx| {
+            this.input
+                .update(cx, |input, cx| input.set_value("/uninstall", window, cx));
+            this.search(cx);
+            assert!(!this.searching);
+            assert!(this.status.contains("可卸载应用"));
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn clipboard_snapshot_preserves_selection_and_late_app_scan_leaves_it_untouched(
+    cx: &mut TestAppContext,
+) {
+    let (handle, launcher) = fixture(cx);
+    let entry = |name: &str| {
+        serde_json::from_value::<clipboard::Entry>(serde_json::json!({
+        "id":name, "title":name, "copied_at":0, "bytes":10, "payload":{"Text":name}, "thumbnail":null
+    })).unwrap()
+    };
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.input
+                .update(cx, |input, cx| input.set_value("/clip", window, cx));
+            this.search(cx);
+            this.clipboard_event(
+                clipboard::Event::Snapshot(vec![entry("a"), entry("b")]),
+                window,
+                cx,
+            );
+            this.selected = 1;
+            this.clipboard_event(
+                clipboard::Event::Snapshot(vec![entry("c"), entry("a"), entry("b")]),
+                window,
+                cx,
+            );
+            assert_eq!(this.results[this.selected].id, "b");
+            let generation = this.generation;
+            this.worker_event(
+                worker::Event::Apps {
+                    generation: this.catalog_generation,
+                    catalog: Catalog::default(),
+                    uninstall_targets: vec![],
+                },
+                cx,
+            );
+            assert_eq!(this.generation, generation);
+            assert_eq!(this.results[this.selected].id, "b");
+        });
     })
     .unwrap();
 }

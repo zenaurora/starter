@@ -22,6 +22,8 @@ pub enum Mode {
     Apps,
     Files,
     Content,
+    Uninstall,
+    Clipboard,
 }
 
 impl Mode {
@@ -30,6 +32,18 @@ impl Mode {
             Self::Apps => "应用",
             Self::Files => "文件与文件夹",
             Self::Content => "文本内容",
+            Self::Uninstall => "卸载应用",
+            Self::Clipboard => "剪贴板历史",
+        }
+    }
+
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::Apps => "",
+            Self::Files => "/f ",
+            Self::Content => "/c ",
+            Self::Uninstall => "/uninstall ",
+            Self::Clipboard => "/clip ",
         }
     }
 }
@@ -43,7 +57,13 @@ pub struct Query {
 impl Query {
     pub fn parse(input: &str) -> Self {
         let input = input.trim_start();
-        for (prefix, mode) in [("/f", Mode::Files), ("/c", Mode::Content)] {
+        for (prefix, mode) in [
+            ("/f", Mode::Files),
+            ("/c", Mode::Content),
+            ("/uninstall", Mode::Uninstall),
+            ("/clip", Mode::Clipboard),
+            ("/clipboard", Mode::Clipboard),
+        ] {
             if let Some(rest) = input.strip_prefix(prefix)
                 && (rest.is_empty() || rest.starts_with(char::is_whitespace))
             {
@@ -76,6 +96,11 @@ pub enum Kind {
     File,
     Folder,
     Content,
+    Uninstall,
+    ClipboardText,
+    ClipboardLink,
+    ClipboardImage,
+    ClipboardFiles,
 }
 
 impl Kind {
@@ -85,6 +110,11 @@ impl Kind {
             Self::File => "文件",
             Self::Folder => "目录",
             Self::Content => "内容",
+            Self::Uninstall => "卸载",
+            Self::ClipboardText => "文本",
+            Self::ClipboardLink => "链接",
+            Self::ClipboardImage => "图片",
+            Self::ClipboardFiles => "文件",
         }
     }
 }
@@ -102,7 +132,7 @@ pub fn app_candidates(apps: &[Application], config: &Config) -> Vec<Candidate> {
         .collect()
 }
 
-fn app_aliases(app: &Application, config: &Config) -> Vec<String> {
+pub(crate) fn app_aliases(app: &Application, config: &Config) -> Vec<String> {
     let mut aliases = app.aliases.clone();
     // Some Windows shortcuts and apps without localized metadata use English
     // names only. These exact-name aliases also work for existing configurations.
@@ -482,6 +512,12 @@ mod tests {
         assert_eq!(Query::parse("/f").mode, Mode::Files);
         assert_eq!(Query::parse("/foo/bar").mode, Mode::Apps);
         assert_eq!(Query::parse("https://a/c").mode, Mode::Apps);
+        assert_eq!(Query::parse(" /uninstall 微信").mode, Mode::Uninstall);
+        assert_eq!(Query::parse("/uninstall\t微信").text, "微信");
+        assert_eq!(Query::parse("/clip 图片 2026-10").mode, Mode::Clipboard);
+        assert_eq!(Query::parse("/clipboard 链接").text, "链接");
+        assert_eq!(Query::parse("/uninstaller/foo").mode, Mode::Apps);
+        assert_eq!(Query::parse("/clipboard/path").mode, Mode::Apps);
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub struct Config {
     /// macOS: application name; Windows: executable path/name. Never a shell string.
     pub terminal: String,
     pub auto_check_updates: bool,
+    pub clipboard_history: bool,
     pub shortcuts: Vec<AppShortcut>,
     /// Starter-only file associations: extensions without '.', '*' or 'folder'.
     pub open_with: BTreeMap<String, String>,
@@ -48,6 +49,7 @@ impl Default for Config {
             }
             .into(),
             auto_check_updates: true,
+            clipboard_history: true,
             shortcuts: Vec::new(),
             open_with: BTreeMap::new(),
             search_roots: Vec::new(),
@@ -161,6 +163,7 @@ mod tests {
         let mut config = Config {
             theme: ThemeName::Everforest,
             auto_check_updates: false,
+            clipboard_history: false,
             search_roots: vec![PathBuf::from("~/code")],
             ..Config::default()
         };
@@ -182,6 +185,7 @@ mod tests {
         assert_eq!(saved.shortcuts, config.shortcuts);
         assert_eq!(saved.theme, ThemeName::Everforest);
         assert!(!saved.auto_check_updates);
+        assert!(!saved.clipboard_history);
         assert_eq!(saved.search_roots, config.search_roots);
         assert_eq!(saved.aliases, config.aliases);
         assert_eq!(saved.favorites, config.favorites);
@@ -192,6 +196,7 @@ mod tests {
         assert_eq!(old.theme, ThemeName::Catppuccin);
         assert_eq!(old.terminal, "kitty");
         assert!(old.auto_check_updates);
+        assert!(old.clipboard_history);
         assert!(old.open_with.is_empty());
         assert!(old.shortcuts.is_empty());
         fs::remove_dir_all(path.parent().unwrap()).unwrap();

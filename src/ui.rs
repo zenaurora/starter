@@ -20,10 +20,12 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use starter::{
     catalog::Catalog,
+    clipboard,
     config::{self, Config},
     history::History,
     opening,
     search::{self, Candidate, Kind, Mode, Query},
+    uninstall,
     updates::{self, Status as UpdateStatus},
 };
 use std::{
@@ -45,6 +47,16 @@ pub struct Launcher {
     config_path: PathBuf,
     shell: Option<Shell>,
     history: History,
+    clipboard_entries: Vec<clipboard::Entry>,
+    clipboard_root: PathBuf,
+    clipboard_worker: async_channel::Sender<clipboard::Command>,
+    clipboard_restore_pending: bool,
+    clipboard_hide_after_restore: bool,
+    clipboard_error: Option<String>,
+    uninstall_targets: Vec<uninstall::Target>,
+    uninstall_confirmation: Option<uninstall::Target>,
+    uninstall_busy: bool,
+    dialog_focus: FocusHandle,
     catalog: Catalog,
     candidates: Vec<Candidate>,
     results: Vec<Candidate>,
@@ -92,7 +104,9 @@ impl Launcher {
             }
             History::empty(history_path)
         });
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索应用，或输入 /f、/c"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("搜索应用，或输入 /f、/c、/clip、/uninstall")
+        });
         input.update(cx, |state, cx| state.focus(window, cx));
         let input_focus = input.focus_handle(cx);
         let subscriptions = vec![
@@ -115,9 +129,24 @@ impl Launcher {
         ];
         let (icons, icon_events) = Icons::new();
         let (worker, worker_events) = worker::start();
+        let clipboard_root = config_path.with_file_name("clipboard");
+        let (clipboard_worker, clipboard_events) =
+            clipboard::start(clipboard_root.clone(), config.clipboard_history);
         let (shell_sender, shell_events) = async_channel::unbounded();
         let setup = Shell::start(&config, shell_sender);
         let mut tasks = vec![
+            cx.spawn_in(window, async move |this, cx| {
+                while let Ok(event) = clipboard_events.recv().await {
+                    if this
+                        .update_in(cx, |this, window, cx| {
+                            this.clipboard_event(event, window, cx)
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }),
             cx.spawn_in(window, async move |this, cx| {
                 while let Ok(icon) = icon_events.recv().await {
                     if this
@@ -234,6 +263,16 @@ impl Launcher {
             config_path,
             shell,
             history,
+            clipboard_entries: Vec::new(),
+            clipboard_root,
+            clipboard_worker,
+            clipboard_restore_pending: false,
+            clipboard_hide_after_restore: false,
+            clipboard_error: None,
+            uninstall_targets: Vec::new(),
+            uninstall_confirmation: None,
+            uninstall_busy: false,
+            dialog_focus: cx.focus_handle(),
             catalog: Catalog::default(),
             candidates: Vec::new(),
             results: Vec::new(),
@@ -284,12 +323,15 @@ impl Launcher {
                 && this.visible
                 && this.settings.is_none()
                 && this.error_dialog.is_none()
+                && this.uninstall_confirmation.is_none()
             {
                 this.input.update(cx, |input, cx| input.focus(window, cx));
             } else if !window.is_window_active()
                 && this.visible
                 && this.shell.is_some()
                 && this.settings.is_none()
+                && this.error_dialog.is_none()
+                && this.uninstall_confirmation.is_none()
             {
                 this.hide(window, cx);
             }
@@ -422,6 +464,21 @@ impl Launcher {
                     format!("，{} 处目录未能读取", self.catalog.warnings.len())
                 }
             );
+        } else if self.query.mode == Mode::Uninstall {
+            self.searching = false;
+            let candidates: Vec<_> = self
+                .uninstall_targets
+                .iter()
+                .map(|target| target.candidate(&self.config))
+                .collect();
+            self.results = search::rank(&candidates, &self.query.text, &Default::default());
+            self.status = format!(
+                "{} 个可卸载应用 · 系统应用与 Starter 已排除",
+                self.uninstall_targets.len()
+            );
+        } else if self.query.mode == Mode::Clipboard {
+            self.searching = false;
+            self.clipboard_results();
         } else {
             self.results.clear();
             self.searching = true;
@@ -441,9 +498,11 @@ impl Launcher {
             worker::Event::Apps {
                 generation,
                 catalog,
+                uninstall_targets,
             } if generation == self.catalog_generation => {
                 self.candidates = search::app_candidates(&catalog.apps, &self.config);
                 self.catalog = catalog;
+                self.uninstall_targets = uninstall_targets;
                 if let Some(settings) = &self.settings {
                     settings.update(cx, |settings, cx| {
                         settings.set_apps(self.catalog.apps.clone(), cx)
@@ -453,7 +512,7 @@ impl Launcher {
                 // a Files/Content query is in flight would cancel the running disk
                 // scan, clear the streamed results, reset the selection and replay the
                 // identical query after another debounce delay.
-                if self.query.mode == Mode::Apps {
+                if matches!(self.query.mode, Mode::Apps | Mode::Uninstall) {
                     self.search(cx);
                 } else {
                     // `recent` renders straight from `self.candidates`, so repaint.
@@ -474,6 +533,197 @@ impl Launcher {
             }
             _ => {}
         }
+    }
+
+    fn clipboard_results(&mut self) {
+        self.results = clipboard::search(&self.clipboard_entries, &self.query.text);
+        self.status = self.clipboard_error.clone().unwrap_or_else(|| {
+            format!(
+                "{} 条历史 · {} · 图片、文件、链接、文本",
+                self.clipboard_entries.len(),
+                if self.config.clipboard_history {
+                    "正在记录"
+                } else {
+                    "记录已暂停"
+                }
+            )
+        });
+    }
+
+    fn clipboard_event(
+        &mut self,
+        event: clipboard::Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            clipboard::Event::Snapshot(entries) => {
+                let selected = self.results.get(self.selected).map(|c| c.id.clone());
+                self.clipboard_entries = entries;
+                self.clipboard_error = None;
+                if self.query.mode == Mode::Clipboard {
+                    self.clipboard_results();
+                    self.selected = selected
+                        .and_then(|id| self.results.iter().position(|c| c.id == id))
+                        .unwrap_or(0);
+                    self.scroll
+                        .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+                }
+            }
+            clipboard::Event::Restored => {
+                self.clipboard_restore_pending = false;
+                self.status = "已复制，可粘贴到其他应用".into();
+                if self.clipboard_hide_after_restore {
+                    self.hide(window, cx);
+                }
+            }
+            clipboard::Event::Cleared => {
+                if let Some(settings) = &self.settings {
+                    settings.update(cx, |settings, cx| {
+                        settings.clipboard_message = Some("剪贴板历史已清空".into());
+                        cx.notify();
+                    });
+                }
+            }
+            clipboard::Event::Failed(error) => {
+                self.clipboard_restore_pending = false;
+                self.clipboard_error = Some(error.clone());
+                if self.query.mode == Mode::Clipboard {
+                    self.status = error.clone();
+                }
+                if let Some(settings) = &self.settings {
+                    settings.update(cx, |settings, cx| {
+                        settings.error = Some(error);
+                        cx.notify();
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn restore_clipboard(&mut self, hide: bool, cx: &mut Context<Self>) {
+        if self.clipboard_restore_pending {
+            return;
+        }
+        if let Some(candidate) = self.results.get(self.selected) {
+            if self
+                .clipboard_worker
+                .try_send(clipboard::Command::Restore(candidate.id.clone()))
+                .is_ok()
+            {
+                self.clipboard_restore_pending = true;
+                self.clipboard_hide_after_restore = hide;
+                self.status = "正在恢复剪贴板…".into();
+            } else {
+                self.status = "剪贴板历史未运行，请重启后重试".into();
+            }
+            cx.notify();
+        }
+    }
+
+    fn confirm_uninstall(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.uninstall_busy {
+            return;
+        }
+        let Some(target) = self.uninstall_confirmation.clone() else {
+            return;
+        };
+        self.uninstall_busy = true;
+        cx.notify();
+        let id = target.id.clone();
+        let job = cx
+            .background_executor()
+            .spawn(async move { target.execute() });
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = job.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.uninstall_busy = false;
+                this.uninstall_confirmation = None;
+                this.input.update(cx, |input, cx| input.focus(window, cx));
+                match result {
+                    Ok(message) => {
+                        if cfg!(target_os = "macos") {
+                            this.uninstall_targets.retain(|target| target.id != id);
+                            this.catalog.apps.retain(|app| app.id != id);
+                            this.candidates.retain(|candidate| candidate.id != id);
+                            this.search(cx);
+                        }
+                        this.status = message;
+                    }
+                    Err(error) => this.status = format!("卸载失败：{error:#}"),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn uninstall_dialog(&self, cx: &Context<Self>) -> AnyElement {
+        let Some(target) = &self.uninstall_confirmation else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme();
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.background)
+            .track_focus(&self.dialog_focus)
+            .capture_key_down(cx.listener(Self::key_down))
+            .child(
+                div()
+                    .w(px(520.))
+                    .max_w_full()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("卸载 {}", target.name)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .line_height(relative(1.6))
+                            .child(target.description()),
+                    )
+                    .when(self.uninstall_busy, |body| body.child("正在处理…"))
+                    .when(!self.uninstall_busy, |body| {
+                        body.child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_3()
+                                .child(
+                                    Button::new("cancel-uninstall")
+                                        .label("取消 · Esc")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.uninstall_confirmation = None;
+                                            this.input
+                                                .update(cx, |input, cx| input.focus(window, cx));
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("confirm-uninstall")
+                                        .label(if cfg!(target_os = "macos") {
+                                            "确认移到废纸篓"
+                                        } else {
+                                            "确认启动卸载"
+                                        })
+                                        .primary()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.confirm_uninstall(window, cx)
+                                        })),
+                                ),
+                        )
+                    }),
+            )
+            .into_any_element()
     }
 
     fn shell_event(&mut self, event: ShellEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -516,6 +766,9 @@ impl Launcher {
                     Ok(config) => {
                         appearance::apply(config.theme, &config, window, cx);
                         self.config = config;
+                        let _ = self
+                            .clipboard_worker
+                            .try_send(clipboard::Command::Enabled(self.config.clipboard_history));
                         self.close_settings(window, cx);
                         self.settings = None;
                         self.settings_subscription = None;
@@ -536,6 +789,12 @@ impl Launcher {
     }
 
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.uninstall_busy {
+            self.visible = true;
+            platform::show(window, cx);
+            return;
+        }
+        self.uninstall_confirmation = None;
         if self.settings.is_some() {
             self.close_settings(window, cx);
         }
@@ -550,7 +809,11 @@ impl Launcher {
         // Native activation may complete after show() returns. Also restore
         // focus once the current UI update and layout have settled.
         cx.defer_in(window, |this, window, cx| {
-            if this.visible && this.settings.is_none() && this.error_dialog.is_none() {
+            if this.visible
+                && this.settings.is_none()
+                && this.error_dialog.is_none()
+                && this.uninstall_confirmation.is_none()
+            {
                 this.input.update(cx, |input, cx| input.focus(window, cx));
                 cx.notify();
             }
@@ -570,6 +833,25 @@ impl Launcher {
     }
 
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.uninstall_confirmation.is_some() || self.uninstall_busy {
+            return;
+        }
+        if self.query.mode == Mode::Clipboard {
+            self.restore_clipboard(true, cx);
+            return;
+        }
+        if self.query.mode == Mode::Uninstall {
+            if let Some(candidate) = self.results.get(self.selected) {
+                self.uninstall_confirmation = self
+                    .uninstall_targets
+                    .iter()
+                    .find(|t| t.id == candidate.id)
+                    .cloned();
+                window.focus(&self.dialog_focus, cx);
+                cx.notify();
+            }
+            return;
+        }
         let Some(candidate) = self.results.get(self.selected) else {
             return;
         };
@@ -599,6 +881,16 @@ impl Launcher {
     }
 
     fn reveal_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.uninstall_confirmation.is_some() {
+            return;
+        }
+        if let Some(candidate) = self.results.get(self.selected)
+            && candidate.path.as_os_str().is_empty()
+        {
+            self.status = "这条记录没有可定位的文件".into();
+            cx.notify();
+            return;
+        }
         if let Some(candidate) = self.results.get(self.selected) {
             match platform::reveal(&candidate.path) {
                 Ok(()) => self.hide(window, cx),
@@ -611,6 +903,13 @@ impl Launcher {
     }
 
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
+        if self.uninstall_confirmation.is_some() {
+            return;
+        }
+        if self.query.mode == Mode::Clipboard {
+            self.restore_clipboard(false, cx);
+            return;
+        }
         if let Some(candidate) = self.results.get(self.selected) {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 candidate.path.display().to_string(),
@@ -651,6 +950,18 @@ impl Launcher {
         if self.settings.is_some() {
             return;
         }
+        if self.uninstall_confirmation.is_some() {
+            if event.keystroke.key == "escape" && !self.uninstall_busy {
+                self.uninstall_confirmation = None;
+                self.input.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }
+            // Enter cannot trigger a destructive operation from the search input.
+            if event.keystroke.key != "tab" {
+                cx.stop_propagation();
+            }
+            return;
+        }
         // Let the native input method handle candidate selection and composition.
         let composing = self.input.update(cx, |input, cx| {
             input.marked_text_range(window, cx).is_some()
@@ -675,11 +986,7 @@ impl Launcher {
             "escape" => {
                 let value = self.input.read(cx).value();
                 let next = if !self.query.text.is_empty() && self.query.mode != Mode::Apps {
-                    if self.query.mode == Mode::Files {
-                        "/f "
-                    } else {
-                        "/c "
-                    }
+                    self.query.mode.prefix()
                 } else if !value.is_empty() {
                     ""
                 } else {
@@ -719,19 +1026,36 @@ impl Launcher {
         self.settings_subscription = Some(cx.subscribe_in(
             &settings,
             window,
-            |this, _, event, window, cx| match event {
-                settings::Event::Close => this.close_settings(window, cx),
-                settings::Event::OpenConfig => this.shell_event(ShellEvent::OpenConfig, window, cx),
-                settings::Event::CheckUpdates => this.check_updates(window, cx),
-                settings::Event::InstallUpdate => this.install_update(window, cx),
-                settings::Event::CancelUpdate => {
-                    this.update_cancelled.store(true, Ordering::Relaxed);
-                }
-                settings::Event::Preview(theme) => {
-                    appearance::apply(*theme, &this.config, window, cx)
-                }
-                settings::Event::Save(config) => {
-                    this.save_settings(config.as_ref().clone(), window, cx)
+            |this, _, event, window, cx| {
+                match event {
+                    settings::Event::Close => this.close_settings(window, cx),
+                    settings::Event::OpenConfig => {
+                        this.shell_event(ShellEvent::OpenConfig, window, cx)
+                    }
+                    settings::Event::CheckUpdates => this.check_updates(window, cx),
+                    settings::Event::InstallUpdate => this.install_update(window, cx),
+                    settings::Event::CancelUpdate => {
+                        this.update_cancelled.store(true, Ordering::Relaxed);
+                    }
+                    settings::Event::ClearClipboard => {
+                        if this
+                            .clipboard_worker
+                            .try_send(clipboard::Command::Clear)
+                            .is_err()
+                            && let Some(settings) = &this.settings
+                        {
+                            settings.update(cx, |settings, cx| {
+                                settings.error = Some("剪贴板历史未运行，请重启后重试".into());
+                                cx.notify();
+                            });
+                        }
+                    }
+                    settings::Event::Preview(theme) => {
+                        appearance::apply(*theme, &this.config, window, cx)
+                    }
+                    settings::Event::Save(config) => {
+                        this.save_settings(config.as_ref().clone(), window, cx)
+                    }
                 }
             },
         ));
@@ -766,6 +1090,9 @@ impl Launcher {
             Ok(()) => {
                 let enable_updates = config.auto_check_updates && !self.config.auto_check_updates;
                 self.config = config;
+                let _ = self
+                    .clipboard_worker
+                    .try_send(clipboard::Command::Enabled(self.config.clipboard_history));
                 self.close_settings(window, cx);
                 self.refresh_apps();
                 self.search(cx);
@@ -928,8 +1255,22 @@ impl Launcher {
             Kind::File => IconName::File,
             Kind::Folder => IconName::Folder,
             Kind::Content => IconName::FileText,
+            Kind::Uninstall => IconName::AppWindow,
+            Kind::ClipboardText | Kind::ClipboardLink => IconName::FileText,
+            Kind::ClipboardImage | Kind::ClipboardFiles => IconName::File,
         };
-        let image = self.icons.get(&candidate.path);
+        let thumbnail = self
+            .clipboard_entries
+            .iter()
+            .find(|e| e.id == candidate.id)
+            .and_then(|e| e.thumbnail(&self.clipboard_root));
+        let image = if candidate.path.as_os_str().is_empty() {
+            None
+        } else {
+            self.icons.get(&candidate.path)
+        };
+        let clipboard = self.query.mode == Mode::Clipboard;
+        let clipboard_id = candidate.id.clone();
         let home = dirs::home_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
@@ -954,9 +1295,13 @@ impl Launcher {
             .items_center()
             .justify_center()
             .text_color(theme.primary);
-        let icon = match image {
-            Some(image) => icon.child(img(image).size(px(36.))),
-            None => icon.child(Icon::new(symbol).with_size(px(24.))),
+        let icon = if let Some(path) = thumbnail {
+            icon.child(img(path).size(px(36.)).object_fit(ObjectFit::Contain))
+        } else {
+            match image {
+                Some(image) => icon.child(img(image).size(px(36.))),
+                None => icon.child(Icon::new(symbol).with_size(px(24.))),
+            }
         };
         div()
             .w_full()
@@ -1031,6 +1376,24 @@ impl Launcher {
                                 }),
                             ),
                     )
+                    .when(clipboard, |this| {
+                        this.child(
+                            Button::new(("remove-clipboard", index))
+                                .label("删除")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this
+                                        .clipboard_worker
+                                        .try_send(clipboard::Command::Remove(clipboard_id.clone()))
+                                        .is_err()
+                                    {
+                                        this.status = "剪贴板历史未运行，请重启后重试".into();
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                    })
                     .when(app, |this| {
                         this.child(
                             Button::new(("favorite", index))
@@ -1070,6 +1433,9 @@ impl Drop for Launcher {
 
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.uninstall_confirmation.is_some() {
+            return self.uninstall_dialog(cx);
+        }
         if let Some(dialog) = &self.error_dialog {
             return div()
                 .size_full()
@@ -1097,10 +1463,18 @@ impl Render for Launcher {
         .w_full();
         let empty = if self.searching {
             "正在搜索…"
-        } else if self.query.mode != Mode::Apps && self.config.search_roots.is_empty() {
+        } else if matches!(self.query.mode, Mode::Files | Mode::Content)
+            && self.config.search_roots.is_empty()
+        {
             "先选择搜索目录"
         } else if self.query.mode == Mode::Content && self.query.text.is_empty() {
             "输入要查找的文本"
+        } else if self.query.mode == Mode::Clipboard && self.clipboard_entries.is_empty() {
+            if self.config.clipboard_history {
+                "复制一些内容后，在这里回搜"
+            } else {
+                "记录已暂停，可在设置中开启"
+            }
         } else {
             "没有匹配结果"
         };
@@ -1113,6 +1487,8 @@ impl Render for Launcher {
             (Mode::Apps, IconName::AppWindow, "应用", ""),
             (Mode::Files, IconName::FolderSearch, "文件 /f", "/f "),
             (Mode::Content, IconName::FileText, "内容 /c", "/c "),
+            (Mode::Clipboard, IconName::FileText, "剪贴板", "/clip "),
+            (Mode::Uninstall, IconName::AppWindow, "卸载", "/uninstall "),
         ];
         div()
             .size_full()
@@ -1282,10 +1658,15 @@ impl Render for Launcher {
                             div()
                                 .text_size(px(12.))
                                 .text_color(theme.muted_foreground)
-                                .child("应用名 · 文件与目录 · 文本内容"),
+                                .child(if self.query.mode == Mode::Clipboard {
+                                    "输入关键词，或用 图片 / 文件 / 链接 / 文本 / 日期 筛选"
+                                } else {
+                                    "应用 · 文件 · 内容 · 剪贴板 · 卸载"
+                                }),
                         )
                         .when(
-                            self.query.mode != Mode::Apps && self.config.search_roots.is_empty(),
+                            matches!(self.query.mode, Mode::Files | Mode::Content)
+                                && self.config.search_roots.is_empty(),
                             |this| {
                                 this.child(
                                     Button::new("configure-search")
@@ -1320,16 +1701,17 @@ impl Render for Launcher {
                             .text_ellipsis()
                             .child(self.status.clone()),
                     )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .ml_3()
-                            .child(if cfg!(target_os = "macos") {
-                                "↑↓ 选择   ↵ 打开   ⌘↵ 定位   ⇧↵ 复制"
-                            } else {
-                                "↑↓ 选择   ↵ 打开   Ctrl+↵ 定位   ⇧↵ 复制"
-                            }),
-                    ),
+                    .child(div().flex_shrink_0().ml_3().child(
+                        if self.query.mode == Mode::Clipboard {
+                            "↑↓ 选择   ↵ 复制并收起   ⇧↵ 复制"
+                        } else if self.query.mode == Mode::Uninstall {
+                            "↑↓ 选择   ↵ 查看卸载确认   Esc 返回"
+                        } else if cfg!(target_os = "macos") {
+                            "↑↓ 选择   ↵ 打开   ⌘↵ 定位   ⇧↵ 复制"
+                        } else {
+                            "↑↓ 选择   ↵ 打开   Ctrl+↵ 定位   ⇧↵ 复制"
+                        },
+                    )),
             )
             .into_any_element()
     }

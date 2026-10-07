@@ -3,6 +3,7 @@ use starter::{
     catalog::{self, Catalog},
     config,
     search::{self, Candidate, ContentSummary, FileIndex, Mode, Query},
+    uninstall,
 };
 use std::{
     collections::BTreeMap,
@@ -34,6 +35,7 @@ pub enum Event {
     Apps {
         generation: u64,
         catalog: Catalog,
+        uninstall_targets: Vec<uninstall::Target>,
     },
     Results {
         generation: u64,
@@ -58,10 +60,13 @@ pub fn start() -> (Sender<Command>, Receiver<Event>) {
             while let Ok(command) = commands.recv_blocking() {
                 match command {
                     Command::Apps { generation } => {
+                        let catalog = catalog::discover();
+                        let uninstall_targets = uninstall::discover(&catalog);
                         if events
                             .send_blocking(Event::Apps {
                                 generation,
-                                catalog: catalog::discover(),
+                                catalog,
+                                uninstall_targets,
                             })
                             .is_err()
                         {
@@ -73,10 +78,13 @@ pub fn start() -> (Sender<Command>, Receiver<Event>) {
                         // application folders, so only an explicit refresh drops it.
                         cached_roots = None;
                         index = FileIndex::default();
+                        let catalog = catalog::discover();
+                        let uninstall_targets = uninstall::discover(&catalog);
                         if events
                             .send_blocking(Event::Apps {
                                 generation,
-                                catalog: catalog::discover(),
+                                catalog,
+                                uninstall_targets,
                             })
                             .is_err()
                         {
@@ -208,7 +216,7 @@ pub fn start() -> (Sender<Command>, Receiver<Event>) {
                                     break;
                                 }
                             }
-                            Mode::Apps => {}
+                            Mode::Apps | Mode::Uninstall | Mode::Clipboard => {}
                         }
                     }
                 }

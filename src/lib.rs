@@ -1,8 +1,10 @@
 pub mod catalog;
+pub mod clipboard;
 pub mod config;
 pub mod history;
 pub mod hotkeys;
 pub mod opening;
 pub mod search;
+pub mod uninstall;
 pub mod updates;
 pub mod version;

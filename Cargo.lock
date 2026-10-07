@@ -7027,6 +7027,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "chrono",
  "dirs 7.0.0",
  "file_icon_provider",
  "global-hotkey",
@@ -7050,6 +7051,7 @@ dependencies = [
  "tray-icon",
  "ureq",
  "windows-sys 0.61.2",
+ "winreg",
  "zip",
 ]
 

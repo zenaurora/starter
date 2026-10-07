@@ -29,6 +29,7 @@ pub enum Event {
     CheckUpdates,
     InstallUpdate,
     CancelUpdate,
+    ClearClipboard,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,7 @@ enum Tab {
     Search,
     Aliases,
     Updates,
+    Clipboard,
 }
 
 pub struct Settings {
@@ -64,6 +66,8 @@ pub struct Settings {
     pub error: Option<String>,
     pub update_status: UpdateStatus,
     pub can_install: bool,
+    clipboard_clear_confirmation: bool,
+    pub clipboard_message: Option<String>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -145,6 +149,8 @@ impl Settings {
             error: None,
             update_status: UpdateStatus::Idle,
             can_install: false,
+            clipboard_clear_confirmation: false,
+            clipboard_message: None,
             _tasks: Vec::new(),
         }
     }
@@ -540,6 +546,23 @@ impl Settings {
         let theme = cx.theme();
         let body = div().w_full().flex().flex_col().gap_5();
         match self.tab {
+            Tab::Clipboard => body
+                .child(div().flex().items_center().justify_between().child("记录剪贴板历史")
+                    .child(Switch::new("clipboard-history").checked(self.draft.clipboard_history)
+                        .on_change(cx.listener(|this, checked, _, cx| { this.draft.clipboard_history = *checked; cx.notify(); }))))
+                .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("保存设置后生效。开启时在后台记录新复制的文本、图片、文件和链接，仅保存到本机。暂停后已有历史仍可回搜。"))
+                .child(div().text_size(px(12.)).child("输入 /clip 打开历史。关键词搜索文本、网址和文件名；图片支持缩略图，以及类型、复制日期筛选。"))
+                .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("保留最近 30 天、最多 200 条，内容总量上限 100 MiB，单条上限 16 MiB。文件记录保存原路径，文件移动或删除后无法再次复制。系统标记为私密或临时的内容不会记录。"))
+                .child(Button::new("clear-clipboard").label(if self.clipboard_clear_confirmation { "确认清空所有历史" } else { "清空剪贴板历史" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.clipboard_clear_confirmation { cx.emit(Event::ClearClipboard); this.clipboard_clear_confirmation = false; }
+                        else { this.clipboard_clear_confirmation = true; }
+                        cx.notify();
+                    })))
+                .when(self.clipboard_clear_confirmation, |body| body.child(Button::new("cancel-clear-clipboard").label("取消清空").ghost()
+                    .on_click(cx.listener(|this, _, _, cx| { this.clipboard_clear_confirmation = false; cx.notify(); }))))
+                .when_some(self.clipboard_message.clone(), |body, message| body.child(message))
+                .into_any_element(),
             Tab::Updates => body
                 .child(div().text_size(px(13.)).child(format!("当前版本 {}", updates::CURRENT_VERSION)))
                 .child(div().flex().items_center().justify_between()
@@ -683,6 +706,7 @@ impl Render for Settings {
             (Tab::Search, IconName::FolderSearch, "搜索目录"),
             (Tab::Aliases, IconName::Tag, "应用别名"),
             (Tab::Updates, IconName::RefreshCw, "更新"),
+            (Tab::Clipboard, IconName::FileText, "剪贴板"),
         ];
         let titles = match self.tab {
             Tab::Opening => ("打开方式", "为文件和文件夹指定常用应用。"),
@@ -691,6 +715,7 @@ impl Render for Settings {
             Tab::Search => ("搜索目录", "限定搜索范围，保持轻量。"),
             Tab::Aliases => ("应用别名", "用你习惯的名字打开应用。"),
             Tab::Updates => ("更新", "检查 Starter 的新版本。"),
+            Tab::Clipboard => ("剪贴板", "找回复制过的内容。"),
         };
         div()
             .size_full()
@@ -851,6 +876,7 @@ mod tests {
     use super::*;
     use core::prelude::v1::test;
     use gpui_kit::base::Root;
+    use gpui_kit::test::TestWindowExt;
 
     fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Settings>) {
         cx.update(gpui_kit::init);
@@ -869,6 +895,47 @@ mod tests {
             .unwrap()
         });
         (handle.downcast().unwrap(), settings)
+    }
+
+    #[gpui_kit::test]
+    fn clearing_clipboard_requires_confirmation_and_can_be_cancelled(cx: &mut TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+        let (handle, settings) = fixture(cx);
+        let count = Rc::new(Cell::new(0));
+        let captured = count.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&settings, move |_, event, _| {
+                if matches!(event, Event::ClearClipboard) {
+                    captured.set(captured.get() + 1);
+                }
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.click("剪贴板", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("clear-clipboard", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(count.get(), 0);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("cancel-clear-clipboard", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(count.get(), 0);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("clear-clipboard", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("clear-clipboard", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(count.get(), 1);
     }
 
     #[gpui_kit::test]
