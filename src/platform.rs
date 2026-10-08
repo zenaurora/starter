@@ -21,6 +21,8 @@ pub enum Event {
     Terminal,
     Application(String),
     OpenSettings,
+    OpenReminders,
+    OpenSystem,
     OpenConfig,
     Reload,
     Refresh,
@@ -47,6 +49,11 @@ impl Shell {
         let items = [
             (MenuItem::new("打开 Starter", true, None), Event::Toggle),
             (MenuItem::new("打开终端", true, None), Event::Terminal),
+            (MenuItem::new("快速提醒…", true, None), Event::OpenReminders),
+            (
+                MenuItem::new("系统命令与设置…", true, None),
+                Event::OpenSystem,
+            ),
             (MenuItem::new("设置…", true, None), Event::OpenSettings),
             (MenuItem::new("打开配置文件", true, None), Event::OpenConfig),
             (MenuItem::new("重新加载配置", true, None), Event::Reload),
@@ -57,7 +64,7 @@ impl Shell {
             (MenuItem::new("退出 Starter", true, None), Event::Quit),
         ];
         for (i, (item, _)) in items.iter().enumerate() {
-            if i == 5 {
+            if i == 7 {
                 menu.append(&PredefinedMenuItem::separator())?;
             }
             menu.append(item)?;

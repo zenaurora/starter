@@ -1,4 +1,6 @@
 mod error_dialog;
+mod launcher_commands;
+mod reminder_panel;
 #[cfg(test)]
 mod tests;
 
@@ -23,8 +25,9 @@ use starter::{
     clipboard,
     config::{self, Config},
     history::History,
-    opening,
+    opening, reminders,
     search::{self, Candidate, Kind, Mode, Query},
+    system_commands::{self, Action as BuiltinAction, Power},
     uninstall,
     updates::{self, Status as UpdateStatus},
 };
@@ -56,6 +59,16 @@ pub struct Launcher {
     uninstall_targets: Vec<uninstall::Target>,
     uninstall_confirmation: Option<uninstall::Target>,
     uninstall_busy: bool,
+    power_confirmation: Option<Power>,
+    power_busy: bool,
+    reminder_entries: Vec<reminders::Entry>,
+    reminder_worker: async_channel::Sender<reminders::Command>,
+    reminder_panel: Option<Entity<reminder_panel::ReminderPanel>>,
+    reminder_subscription: Option<Subscription>,
+    reminder_draft: Option<reminders::Draft>,
+    reminder_pending: bool,
+    reminder_feedback: Option<String>,
+    notification_warning: Option<String>,
     dialog_focus: FocusHandle,
     catalog: Catalog,
     candidates: Vec<Candidate>,
@@ -105,7 +118,7 @@ impl Launcher {
             History::empty(history_path)
         });
         let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("搜索应用，或输入 /f、/c、/clip、/uninstall")
+            InputState::new(window, cx).placeholder("搜索应用、系统命令或设置；/remind 10m 开会")
         });
         input.update(cx, |state, cx| state.focus(window, cx));
         let input_focus = input.focus_handle(cx);
@@ -132,9 +145,23 @@ impl Launcher {
         let clipboard_root = config_path.with_file_name("clipboard");
         let (clipboard_worker, clipboard_events) =
             clipboard::start(clipboard_root.clone(), config.clipboard_history);
+        let (reminder_worker, reminder_events) =
+            reminders::start(config_path.with_file_name("reminders.json"));
         let (shell_sender, shell_events) = async_channel::unbounded();
         let setup = Shell::start(&config, shell_sender);
         let mut tasks = vec![
+            cx.spawn_in(window, async move |this, cx| {
+                while let Ok(event) = reminder_events.recv().await {
+                    if this
+                        .update_in(cx, |this, window, cx| {
+                            this.reminder_event(event, window, cx)
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }),
             cx.spawn_in(window, async move |this, cx| {
                 while let Ok(event) = clipboard_events.recv().await {
                     if this
@@ -272,6 +299,16 @@ impl Launcher {
             uninstall_targets: Vec::new(),
             uninstall_confirmation: None,
             uninstall_busy: false,
+            power_confirmation: None,
+            power_busy: false,
+            reminder_entries: Vec::new(),
+            reminder_worker,
+            reminder_panel: None,
+            reminder_subscription: None,
+            reminder_draft: None,
+            reminder_pending: false,
+            reminder_feedback: None,
+            notification_warning: None,
             dialog_focus: cx.focus_handle(),
             catalog: Catalog::default(),
             candidates: Vec::new(),
@@ -324,6 +361,9 @@ impl Launcher {
                 && this.settings.is_none()
                 && this.error_dialog.is_none()
                 && this.uninstall_confirmation.is_none()
+                && this.power_confirmation.is_none()
+                && !this.power_busy
+                && this.reminder_panel.is_none()
             {
                 this.input.update(cx, |input, cx| input.focus(window, cx));
             } else if !window.is_window_active()
@@ -332,6 +372,9 @@ impl Launcher {
                 && this.settings.is_none()
                 && this.error_dialog.is_none()
                 && this.uninstall_confirmation.is_none()
+                && this.power_confirmation.is_none()
+                && !this.power_busy
+                && this.reminder_panel.is_none()
             {
                 this.hide(window, cx);
             }
@@ -449,8 +492,12 @@ impl Launcher {
         self.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
         if self.query.mode == Mode::Apps {
             self.searching = false;
+            let mut candidates = self.candidates.clone();
+            if !self.query.text.is_empty() {
+                candidates.extend(system_commands::candidates());
+            }
             self.results = search::rank_apps(
-                &self.candidates,
+                &candidates,
                 &self.query.text,
                 &self.history.entries,
                 &self.config.favorites,
@@ -464,6 +511,17 @@ impl Launcher {
                     format!("，{} 处目录未能读取", self.catalog.warnings.len())
                 }
             );
+        } else if self.query.mode == Mode::System {
+            self.searching = false;
+            self.results = search::rank(
+                &system_commands::candidates(),
+                &self.query.text,
+                &Default::default(),
+            );
+            self.status = "输入英文或中文查找 · 重启和关机需确认".into();
+        } else if self.query.mode == Mode::Reminders {
+            self.searching = false;
+            self.reminder_results();
         } else if self.query.mode == Mode::Uninstall {
             self.searching = false;
             let candidates: Vec<_> = self
@@ -782,6 +840,16 @@ impl Launcher {
                     }
                 }
             }
+            ShellEvent::OpenReminders => {
+                self.show(window, cx);
+                self.open_reminders("", window, cx);
+            }
+            ShellEvent::OpenSystem => {
+                self.show(window, cx);
+                self.input
+                    .update(cx, |input, cx| input.set_value("/system ", window, cx));
+                self.search(cx);
+            }
             ShellEvent::Refresh => self.refresh_all(cx),
             ShellEvent::Quit => cx.quit(),
         }
@@ -789,12 +857,15 @@ impl Launcher {
     }
 
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.uninstall_busy {
+        if self.uninstall_busy || self.power_busy {
             self.visible = true;
             platform::show(window, cx);
             return;
         }
         self.uninstall_confirmation = None;
+        self.power_confirmation = None;
+        self.reminder_panel = None;
+        self.reminder_subscription = None;
         if self.settings.is_some() {
             self.close_settings(window, cx);
         }
@@ -813,6 +884,9 @@ impl Launcher {
                 && this.settings.is_none()
                 && this.error_dialog.is_none()
                 && this.uninstall_confirmation.is_none()
+                && this.power_confirmation.is_none()
+                && !this.power_busy
+                && this.reminder_panel.is_none()
             {
                 this.input.update(cx, |input, cx| input.focus(window, cx));
                 cx.notify();
@@ -833,7 +907,12 @@ impl Launcher {
     }
 
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.uninstall_confirmation.is_some() || self.uninstall_busy {
+        if self.uninstall_confirmation.is_some()
+            || self.uninstall_busy
+            || self.power_confirmation.is_some()
+            || self.power_busy
+            || self.reminder_panel.is_some()
+        {
             return;
         }
         if self.query.mode == Mode::Clipboard {
@@ -852,9 +931,43 @@ impl Launcher {
             }
             return;
         }
-        let Some(candidate) = self.results.get(self.selected) else {
+        let Some(candidate) = self.results.get(self.selected).cloned() else {
             return;
         };
+        if candidate.id == "reminder:create" {
+            if let Some(draft) = self.reminder_draft.clone() {
+                self.send_reminder(reminders::Command::Create(draft), cx);
+            }
+            return;
+        }
+        if candidate.kind == Kind::Reminder || candidate.id == "reminder:new" {
+            let initial = if candidate.id == "reminder:new" {
+                self.query.text.clone()
+            } else {
+                String::new()
+            };
+            self.open_reminders(&initial, window, cx);
+            return;
+        }
+        if let Some(action) = system_commands::resolve(&candidate.id) {
+            match action {
+                BuiltinAction::Power(power) if power.requires_confirmation() => {
+                    self.power_confirmation = Some(power);
+                    window.focus(&self.dialog_focus, cx);
+                    cx.notify();
+                }
+                BuiltinAction::Power(power) => self.execute_power(power, window, cx),
+                BuiltinAction::Settings(setting) => match setting.open() {
+                    Ok(()) => self.hide(window, cx),
+                    Err(error) => {
+                        self.status = format!("设置打开失败：{error:#}");
+                        cx.notify();
+                    }
+                },
+                BuiltinAction::Reminders => self.open_reminders("", window, cx),
+            }
+            return;
+        }
         let app = if candidate.kind == Kind::App {
             None
         } else {
@@ -881,7 +994,11 @@ impl Launcher {
     }
 
     fn reveal_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.uninstall_confirmation.is_some() {
+        if self.uninstall_confirmation.is_some()
+            || self.power_confirmation.is_some()
+            || self.power_busy
+            || self.reminder_panel.is_some()
+        {
             return;
         }
         if let Some(candidate) = self.results.get(self.selected)
@@ -903,7 +1020,11 @@ impl Launcher {
     }
 
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
-        if self.uninstall_confirmation.is_some() {
+        if self.uninstall_confirmation.is_some()
+            || self.power_confirmation.is_some()
+            || self.power_busy
+            || self.reminder_panel.is_some()
+        {
             return;
         }
         if self.query.mode == Mode::Clipboard {
@@ -911,6 +1032,11 @@ impl Launcher {
             return;
         }
         if let Some(candidate) = self.results.get(self.selected) {
+            if candidate.path.as_os_str().is_empty() {
+                self.status = "这项操作没有可复制的文件路径".into();
+                cx.notify();
+                return;
+            }
             cx.write_to_clipboard(ClipboardItem::new_string(
                 candidate.path.display().to_string(),
             ));
@@ -947,7 +1073,28 @@ impl Launcher {
             cx.stop_propagation();
             return;
         }
-        if self.settings.is_some() {
+        if self.settings.is_some() || self.reminder_panel.is_some() {
+            return;
+        }
+        if let Some(power) = self.power_confirmation {
+            if event.keystroke.key == "escape" && !self.power_busy {
+                self.power_confirmation = None;
+                self.input.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            } else if event.keystroke.key == "enter"
+                && (modifiers.platform || modifiers.control)
+                && !self.power_busy
+                && !event.is_held
+            {
+                self.execute_power(power, window, cx);
+            }
+            if event.keystroke.key != "tab" {
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.power_busy {
+            cx.stop_propagation();
             return;
         }
         if self.uninstall_confirmation.is_some() {
@@ -1258,6 +1405,9 @@ impl Launcher {
             Kind::Uninstall => IconName::AppWindow,
             Kind::ClipboardText | Kind::ClipboardLink => IconName::FileText,
             Kind::ClipboardImage | Kind::ClipboardFiles => IconName::File,
+            Kind::SystemCommand => IconName::Command,
+            Kind::SystemSetting => IconName::Settings2,
+            Kind::Reminder | Kind::ReminderDraft => IconName::Clock,
         };
         let thumbnail = self
             .clipboard_entries
@@ -1433,6 +1583,16 @@ impl Drop for Launcher {
 
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.power_confirmation.is_some() {
+            return self.power_dialog(cx);
+        }
+        if let Some(panel) = &self.reminder_panel {
+            return div()
+                .size_full()
+                .capture_key_down(cx.listener(Self::key_down))
+                .child(panel.clone())
+                .into_any_element();
+        }
         if self.uninstall_confirmation.is_some() {
             return self.uninstall_dialog(cx);
         }
@@ -1484,11 +1644,13 @@ impl Render for Launcher {
         let input_focused =
             window.is_window_active() && self.input.focus_handle(cx).is_focused(window);
         let modes = [
-            (Mode::Apps, IconName::AppWindow, "应用", ""),
-            (Mode::Files, IconName::FolderSearch, "文件 /f", "/f "),
-            (Mode::Content, IconName::FileText, "内容 /c", "/c "),
+            (Mode::Apps, IconName::AppWindow, "全部", ""),
+            (Mode::Files, IconName::FolderSearch, "文件", "/f "),
+            (Mode::Content, IconName::FileText, "内容", "/c "),
             (Mode::Clipboard, IconName::FileText, "剪贴板", "/clip "),
             (Mode::Uninstall, IconName::AppWindow, "卸载", "/uninstall "),
+            (Mode::System, IconName::Settings2, "系统", "/system "),
+            (Mode::Reminders, IconName::Clock, "提醒", "/remind "),
         ];
         div()
             .size_full()
@@ -1543,6 +1705,16 @@ impl Render for Launcher {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.input.update(cx, |input, cx| input.focus(window, cx));
                                         cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("reminder-badge")
+                                    .label(self.reminder_badge())
+                                    .icon(IconName::Clock)
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_reminders("", window, cx)
                                     })),
                             )
                             .child(
@@ -1602,6 +1774,10 @@ impl Render for Launcher {
                                     button.bg(theme.accent).text_color(theme.primary)
                                 })
                                 .on_click(cx.listener(move |this, _, window, cx| {
+                                    if mode == Mode::Reminders {
+                                        this.open_reminders("", window, cx);
+                                        return;
+                                    }
                                     this.input.update(cx, |input, cx| {
                                         input.set_value(prefix, window, cx);
                                         input.focus(window, cx);
@@ -1609,14 +1785,7 @@ impl Render for Launcher {
                                     this.search(cx);
                                 }))
                         },
-                    )))
-                    .child(
-                        div()
-                            .pr_2()
-                            .text_size(px(11.))
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{} 条结果", self.results.len())),
-                    ),
+                    ))),
             )
             .when_some(recent, |this, recent| this.child(recent))
             .when(
@@ -1661,7 +1830,7 @@ impl Render for Launcher {
                                 .child(if self.query.mode == Mode::Clipboard {
                                     "输入关键词，或用 图片 / 文件 / 链接 / 文本 / 日期 筛选"
                                 } else {
-                                    "应用 · 文件 · 内容 · 剪贴板 · 卸载"
+                                    "试试 bluetooth、锁屏，或 /remind 10m 开会"
                                 }),
                         )
                         .when(
@@ -1701,17 +1870,26 @@ impl Render for Launcher {
                             .text_ellipsis()
                             .child(self.status.clone()),
                     )
-                    .child(div().flex_shrink_0().ml_3().child(
-                        if self.query.mode == Mode::Clipboard {
-                            "↑↓ 选择   ↵ 复制并收起   ⇧↵ 复制"
-                        } else if self.query.mode == Mode::Uninstall {
-                            "↑↓ 选择   ↵ 查看卸载确认   Esc 返回"
-                        } else if cfg!(target_os = "macos") {
-                            "↑↓ 选择   ↵ 打开   ⌘↵ 定位   ⇧↵ 复制"
-                        } else {
-                            "↑↓ 选择   ↵ 打开   Ctrl+↵ 定位   ⇧↵ 复制"
-                        },
-                    )),
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .ml_3()
+                            .child(if self.query.mode == Mode::Clipboard {
+                                "↑↓ 选择   ↵ 复制并收起   ⇧↵ 复制"
+                            } else if self.query.mode == Mode::Uninstall {
+                                "↑↓ 选择   ↵ 查看卸载确认   Esc 返回"
+                            } else if self
+                                .results
+                                .get(self.selected)
+                                .is_some_and(|c| c.path.as_os_str().is_empty())
+                            {
+                                "↑↓ 选择   ↵ 执行 / 查看   Esc 返回"
+                            } else if cfg!(target_os = "macos") {
+                                "↑↓ 选择   ↵ 打开   ⌘↵ 定位   ⇧↵ 复制"
+                            } else {
+                                "↑↓ 选择   ↵ 打开   Ctrl+↵ 定位   ⇧↵ 复制"
+                            }),
+                    ),
             )
             .into_any_element()
     }

@@ -24,6 +24,7 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                     };
                     appearance::apply(config.theme, &config, window, cx);
                     let (worker, _) = async_channel::unbounded();
+                    let (reminder_worker, _) = async_channel::unbounded();
                     let (clipboard_worker, _) = async_channel::unbounded();
                     let results = (0..3)
                         .map(|i| Candidate {
@@ -58,6 +59,16 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         uninstall_targets: vec![],
                         uninstall_confirmation: None,
                         uninstall_busy: false,
+                        power_confirmation: None,
+                        power_busy: false,
+                        reminder_entries: vec![],
+                        reminder_worker,
+                        reminder_panel: None,
+                        reminder_subscription: None,
+                        reminder_draft: None,
+                        reminder_pending: false,
+                        reminder_feedback: None,
+                        notification_warning: None,
                         dialog_focus: cx.focus_handle(),
                         candidates: Vec::new(),
                         results,
@@ -360,6 +371,151 @@ fn clipboard_snapshot_preserves_selection_and_late_app_scan_leaves_it_untouched(
             assert_eq!(this.generation, generation);
             assert_eq!(this.results[this.selected].id, "b");
         });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn default_search_finds_commands_and_restart_confirmation_ignores_plain_enter(
+    cx: &mut TestAppContext,
+) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            for query in ["bluetooth", "display", "sound", "battery", "锁屏"] {
+                this.input
+                    .update(cx, |input, cx| input.set_value(query, window, cx));
+                this.search(cx);
+                assert!(system_commands::resolve(&this.results[0].id).is_some());
+                assert!(!this.searching);
+            }
+            this.input
+                .update(cx, |input, cx| input.set_value("Restart", window, cx));
+            this.search(cx);
+            this.open_selected(window, cx);
+            assert_eq!(this.power_confirmation, Some(Power::Restart));
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(launcher.read(cx).power_confirmation, Some(Power::Restart));
+        assert!(
+            !launcher.read(cx).power_busy,
+            "plain Enter must not execute a power operation"
+        );
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(launcher.read(cx).power_confirmation.is_none());
+        assert!(launcher.read(cx).input.focus_handle(cx).is_focused(window));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn quick_reminder_previews_and_submits_once_without_touching_disk_or_notifications(
+    cx: &mut TestAppContext,
+) {
+    let (handle, launcher) = fixture(cx);
+    let (sender, receiver) = async_channel::unbounded();
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.reminder_worker = sender;
+            this.input.update(cx, |input, cx| {
+                input.set_value("/remind 10m 开会", window, cx)
+            });
+            this.search(cx);
+            assert_eq!(this.query.mode, Mode::Reminders);
+            assert!(this.results[0].detail.contains("Enter 保存"));
+            assert_eq!(this.reminder_draft.as_ref().unwrap().title, "开会");
+            this.open_selected(window, cx);
+            this.reminder_event(reminders::Event::Snapshot(Vec::new()), window, cx);
+            assert!(
+                this.reminder_pending,
+                "a background snapshot is not a save acknowledgement"
+            );
+            this.open_selected(window, cx);
+        });
+    })
+    .unwrap();
+    let reminders::Command::Create(draft) = receiver.try_recv().unwrap() else {
+        panic!("expected create");
+    };
+    assert_eq!(draft.title, "开会");
+    assert!(
+        receiver.try_recv().is_err(),
+        "pending saves must not create duplicates"
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.reminder_event(reminders::Event::Saved(draft), window, cx);
+            assert!(!this.reminder_pending);
+            assert_eq!(this.input.read(cx).value(), "/remind ");
+            assert!(this.status.contains("已创建"));
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn reminder_panel_owns_focus_presets_and_escape_returns_to_search(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    let (sender, receiver) = async_channel::unbounded();
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.reminder_worker = sender;
+            this.open_reminders("开会", window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(!launcher.read(cx).input.focus_handle(cx).is_focused(window));
+        window.click("5 分钟", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
+        .unwrap();
+    cx.run_until_parked();
+    let reminders::Command::Create(draft) = receiver.try_recv().unwrap() else {
+        panic!("expected create");
+    };
+    assert_eq!(draft.title, "开会");
+    assert!((295..=301).contains(&(draft.due_at - chrono::Local::now().timestamp())));
+    cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(launcher.read(cx).reminder_panel.is_none());
+        assert!(launcher.read(cx).input.focus_handle(cx).is_focused(window));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn mode_navigation_fits_the_launcher_width(cx: &mut TestAppContext) {
+    let (handle, _) = fixture(cx);
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, _| {
+        let mut previous_end = px(0.);
+        for id in ["全部", "文件", "内容", "剪贴板", "卸载", "系统", "提醒"] {
+            let button = window.find(id);
+            let bounds = button.bounds();
+            assert!(button.visible());
+            assert!(
+                bounds.origin.x >= previous_end,
+                "{id} overlaps the preceding mode"
+            );
+            previous_end = bounds.origin.x + bounds.size.width;
+            assert!(previous_end <= px(720.), "{id} exceeds the launcher width");
+        }
     })
     .unwrap();
 }

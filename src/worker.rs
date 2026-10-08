@@ -216,7 +216,11 @@ pub fn start() -> (Sender<Command>, Receiver<Event>) {
                                     break;
                                 }
                             }
-                            Mode::Apps | Mode::Uninstall | Mode::Clipboard => {}
+                            Mode::Apps
+                            | Mode::Uninstall
+                            | Mode::Clipboard
+                            | Mode::System
+                            | Mode::Reminders => {}
                         }
                     }
                 }

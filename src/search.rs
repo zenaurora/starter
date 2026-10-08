@@ -24,6 +24,8 @@ pub enum Mode {
     Content,
     Uninstall,
     Clipboard,
+    System,
+    Reminders,
 }
 
 impl Mode {
@@ -34,6 +36,8 @@ impl Mode {
             Self::Content => "文本内容",
             Self::Uninstall => "卸载应用",
             Self::Clipboard => "剪贴板历史",
+            Self::System => "系统命令与设置",
+            Self::Reminders => "提醒",
         }
     }
 
@@ -44,6 +48,8 @@ impl Mode {
             Self::Content => "/c ",
             Self::Uninstall => "/uninstall ",
             Self::Clipboard => "/clip ",
+            Self::System => "/system ",
+            Self::Reminders => "/remind ",
         }
     }
 }
@@ -63,6 +69,10 @@ impl Query {
             ("/uninstall", Mode::Uninstall),
             ("/clip", Mode::Clipboard),
             ("/clipboard", Mode::Clipboard),
+            ("/system", Mode::System),
+            ("/settings", Mode::System),
+            ("/remind", Mode::Reminders),
+            ("/reminder", Mode::Reminders),
         ] {
             if let Some(rest) = input.strip_prefix(prefix)
                 && (rest.is_empty() || rest.starts_with(char::is_whitespace))
@@ -101,6 +111,10 @@ pub enum Kind {
     ClipboardLink,
     ClipboardImage,
     ClipboardFiles,
+    SystemCommand,
+    SystemSetting,
+    Reminder,
+    ReminderDraft,
 }
 
 impl Kind {
@@ -115,6 +129,10 @@ impl Kind {
             Self::ClipboardLink => "链接",
             Self::ClipboardImage => "图片",
             Self::ClipboardFiles => "文件",
+            Self::SystemCommand => "系统命令",
+            Self::SystemSetting => "系统设置",
+            Self::Reminder => "提醒",
+            Self::ReminderDraft => "新建提醒",
         }
     }
 }
@@ -518,6 +536,11 @@ mod tests {
         assert_eq!(Query::parse("/clipboard 链接").text, "链接");
         assert_eq!(Query::parse("/uninstaller/foo").mode, Mode::Apps);
         assert_eq!(Query::parse("/clipboard/path").mode, Mode::Apps);
+        assert_eq!(Query::parse("/system display").mode, Mode::System);
+        assert_eq!(Query::parse("/settings sound").mode, Mode::System);
+        assert_eq!(Query::parse("/remind 10m 开会").text, "10m 开会");
+        assert_eq!(Query::parse("/reminder").mode, Mode::Reminders);
+        assert_eq!(Query::parse("/reminder/file").mode, Mode::Apps);
     }
 
     #[test]

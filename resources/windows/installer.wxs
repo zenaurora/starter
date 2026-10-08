@@ -24,7 +24,9 @@
       <Directory Id="StarterMenuFolder" Name="Starter">
         <Component Id="StarterShortcut" Guid="0DDB6390-4194-4F6D-8A08-2A1744FAB8D1">
           <Shortcut Id="StarterStartMenu" Name="Starter" Target="[INSTALLFOLDER]Starter.exe"
-                    WorkingDirectory="INSTALLFOLDER" Icon="StarterIcon" />
+                    WorkingDirectory="INSTALLFOLDER" Icon="StarterIcon">
+            <ShortcutProperty Key="System.AppUserModel.ID" Value="dev.starter.launcher" />
+          </Shortcut>
           <RemoveFolder Id="RemoveMenuFolder" On="uninstall" />
           <RegistryValue Root="HKCU" Key="Software\Starter" Name="StartMenuShortcut"
                          Value="1" Type="integer" KeyPath="yes" />
