@@ -55,7 +55,7 @@ pub struct Settings {
     alias_app: Entity<InputState>,
     alias_names: Entity<InputState>,
     shortcut_key: Entity<HotkeyEditor>,
-    shortcut_app: Entity<InputState>,
+    shortcut_apps: Vec<Entity<InputState>>,
     rule: Entity<InputState>,
     rule_app: Entity<InputState>,
     apps: Vec<Application>,
@@ -138,7 +138,7 @@ impl Settings {
             alias_app,
             alias_names,
             shortcut_key,
-            shortcut_app,
+            shortcut_apps: vec![shortcut_app],
             rule,
             rule_app,
             apps,
@@ -272,12 +272,12 @@ impl Settings {
             &self.font,
             &self.alias_app,
             &self.alias_names,
-            &self.shortcut_app,
             &self.rule,
             &self.rule_app,
             &self.app_search,
         ]
         .into_iter()
+        .chain(self.shortcut_apps.iter())
         .any(|input| {
             input.update(cx, |input, cx| {
                 input.marked_text_range(window, cx).is_some()
@@ -305,11 +305,21 @@ impl Settings {
 
     fn pending_shortcut(&self, cx: &App) -> anyhow::Result<Option<AppShortcut>> {
         let hotkey = self.shortcut_key.read(cx).value(cx)?;
-        let application = self.shortcut_app.read(cx).value().trim().to_string();
-        if hotkey.is_empty() && application.is_empty() && self.editing_shortcut.is_none() {
+        let applications = self
+            .shortcut_apps
+            .iter()
+            .map(|input| input.read(cx).value().trim().to_string())
+            .collect::<Vec<_>>();
+        if hotkey.is_empty()
+            && applications.iter().all(String::is_empty)
+            && self.editing_shortcut.is_none()
+        {
             return Ok(None);
         }
-        anyhow::ensure!(!application.is_empty(), "请选择快捷键要打开的应用");
+        anyhow::ensure!(
+            !applications.is_empty() && applications.iter().all(|app| !app.is_empty()),
+            "请为快捷键选择至少一个应用，并填写所有目标应用；多余的空行可移除"
+        );
         let key = hotkeys::parse(&hotkey)?;
         anyhow::ensure!(!key.mods.is_empty(), "全局快捷键必须包含修饰键");
         let enabled = self
@@ -317,9 +327,48 @@ impl Settings {
             .is_none_or(|i| self.draft.shortcuts[i].enabled);
         Ok(Some(AppShortcut {
             hotkey,
-            application,
+            applications,
             enabled,
         }))
+    }
+
+    fn set_shortcut_apps(
+        &mut self,
+        applications: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shortcut_apps = applications
+            .iter()
+            .map(|application| {
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .default_value(application.clone())
+                        .placeholder("选择应用，或填写名称/路径")
+                })
+            })
+            .collect();
+        if self.shortcut_apps.is_empty() {
+            self.add_shortcut_app(window, cx);
+        }
+    }
+
+    fn add_shortcut_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.shortcut_apps.push(
+            cx.new(|cx| InputState::new(window, cx).placeholder("选择应用，或填写名称/路径")),
+        );
+        cx.notify();
+    }
+
+    fn edit_shortcut(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let shortcut = self.draft.shortcuts[index].clone();
+        self.shortcut_key.update(cx, |input, cx| {
+            input.set_value(&shortcut.hotkey, window, cx)
+        });
+        self.set_shortcut_apps(&shortcut.applications, window, cx);
+        self.editing_shortcut = Some(index);
+        self.error = None;
+        cx.notify();
     }
 
     fn add_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -364,8 +413,7 @@ impl Settings {
                 self.editing_shortcut = None;
                 self.shortcut_key
                     .update(cx, |input, cx| input.set_value("", window, cx));
-                self.shortcut_app
-                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.set_shortcut_apps(&[], window, cx);
                 self.error = None;
             }
             Err(error) => self.error = Some(format!("{error:#}")),
@@ -522,6 +570,43 @@ impl Settings {
         .into_any_element()
     }
 
+    fn shortcut_app_fields(&self, cx: &Context<Self>) -> AnyElement {
+        let mut fields = div().flex().flex_col().gap_3();
+        for (i, input) in self.shortcut_apps.iter().enumerate() {
+            fields = fields.child(
+                div()
+                    .id(("shortcut-app", i))
+                    .flex()
+                    .items_end()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.app_field("目标应用", input, cx)),
+                    )
+                    .child(
+                        Button::new(("remove-shortcut-app", i))
+                            .icon(IconName::X)
+                            .ghost()
+                            .disabled(self.shortcut_apps.len() == 1)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.shortcut_apps.remove(i);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        fields
+            .child(
+                Button::new("add-shortcut-app")
+                    .label("添加应用")
+                    .ghost()
+                    .on_click(cx.listener(|this, _, window, cx| this.add_shortcut_app(window, cx))),
+            )
+            .into_any_element()
+    }
+
     fn field(label: &'static str, help: &'static str, input: &Entity<InputState>) -> AnyElement {
         div()
             .w_full()
@@ -591,19 +676,15 @@ impl Settings {
                 for (i, shortcut) in self.draft.shortcuts.iter().enumerate() {
                     list = list.child(div().flex().items_center().gap_2().py_2().border_b_1().border_color(theme.border)
                         .child(Switch::new(("shortcut-enabled", i)).checked(shortcut.enabled).on_change(cx.listener(move |this, checked, _, cx| { this.draft.shortcuts[i].enabled = *checked; cx.notify(); })))
-                        .child(div().flex_1().min_w_0().flex().flex_col().gap_1().child(shortcut.hotkey.clone()).child(div().text_size(px(11.)).text_ellipsis().child(shortcut.application.clone())))
+                        .child(div().flex_1().min_w_0().flex().flex_col().gap_1().child(shortcut.hotkey.clone()).child(div().text_size(px(11.)).text_ellipsis().child(shortcut.applications.join("、"))))
                         .child(Button::new(("edit-shortcut", i)).label("编辑").ghost().small().on_click(cx.listener(move |this, _, window, cx| {
-                            let shortcut = &this.draft.shortcuts[i];
-                            let key = shortcut.hotkey.clone(); let app = shortcut.application.clone();
-                            this.shortcut_key.update(cx, |input, cx| input.set_value(&key, window, cx));
-                            this.shortcut_app.update(cx, |input, cx| input.set_value(app, window, cx));
-                            this.editing_shortcut = Some(i); cx.notify();
+                            this.edit_shortcut(i, window, cx);
                         })))
                         .child(Button::new(("remove-shortcut", i)).icon(IconName::X).ghost().small().on_click(cx.listener(move |this, _, window, cx| {
                             this.draft.shortcuts.remove(i);
                             if this.editing_shortcut.take().is_some() {
                                 this.shortcut_key.update(cx, |input, cx| input.set_value("", window, cx));
-                                this.shortcut_app.update(cx, |input, cx| input.set_value("", window, cx));
+                                this.set_shortcut_apps(&[], window, cx);
                             }
                             cx.notify();
                         }))));
@@ -614,9 +695,10 @@ impl Settings {
                     .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child("点击格子选择按键，＋ 增加格子，× 移除。组合由一个普通按键和修饰键组成，最多 5 格。终端快捷键清空可停用。"))
                     .child(self.app_field("终端应用", &self.terminal, cx))
                     .child(div().mt_3().font_weight(FontWeight::MEDIUM).child("打开应用的全局快捷键"))
+                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child("一个快捷键可同时打开多个应用。例如 Cmd+Enter 打开 kitty 和 ChatGPT，点击「添加应用」增加目标。"))
                     .child(list)
                     .child(self.shortcut_key.clone())
-                    .child(self.app_field("目标应用", &self.shortcut_app, cx))
+                    .child(self.shortcut_app_fields(cx))
                     .child(Button::new("add-shortcut").label(if self.editing_shortcut.is_some() { "更新快捷键" } else { "添加快捷键" }).on_click(cx.listener(|this, _, window, cx| this.add_shortcut(window, cx))))
                     .child(self.picker_content(cx))
                     .into_any_element()
@@ -947,14 +1029,14 @@ mod tests {
             settings.update(cx, |this, cx| {
                 this.shortcut_key
                     .update(cx, |input, cx| input.set_value("Cmd+K", window, cx));
-                this.shortcut_app
-                    .update(cx, |input, cx| input.set_value("Editor", window, cx));
+                this.set_shortcut_apps(&["kitty".into(), "ChatGPT".into()], window, cx);
                 this.rule
                     .update(cx, |input, cx| input.set_value(".MD", window, cx));
                 this.rule_app
                     .update(cx, |input, cx| input.set_value("Editor", window, cx));
                 let saved = this.values(cx).unwrap();
                 assert_eq!(saved.shortcuts.len(), 1);
+                assert_eq!(saved.shortcuts[0].applications, vec!["kitty", "ChatGPT"]);
                 assert_eq!(saved.open_with["md"], "Editor");
                 assert!(this.draft.shortcuts.is_empty());
                 assert!(
@@ -962,6 +1044,8 @@ mod tests {
                     "cancel must still discard pending inputs"
                 );
                 this.add_shortcut(window, cx);
+                assert_eq!(this.shortcut_apps.len(), 1);
+                assert!(this.shortcut_apps[0].read(cx).value().is_empty());
                 this.add_rule(window, cx);
                 let saved = this.values(cx).unwrap();
                 assert_eq!(saved.shortcuts.len(), 1);
@@ -969,7 +1053,7 @@ mod tests {
                 this.shortcut_key.update(cx, |input, cx| {
                     input.set_value(&saved.launcher_hotkey, window, cx)
                 });
-                this.shortcut_app
+                this.shortcut_apps[0]
                     .update(cx, |input, cx| input.set_value("Duplicate", window, cx));
                 assert!(
                     this.values(cx).is_err(),
@@ -987,19 +1071,89 @@ mod tests {
             settings.update(cx, |this, cx| {
                 this.draft.shortcuts.push(AppShortcut {
                     hotkey: "Cmd+K".into(),
-                    application: "Editor".into(),
+                    applications: vec!["kitty".into(), "ChatGPT".into()],
                     enabled: false,
                 });
-                this.editing_shortcut = Some(0);
+                this.edit_shortcut(0, window, cx);
+                assert_eq!(this.shortcut_apps.len(), 2);
+                assert_eq!(this.shortcut_apps[0].read(cx).value(), "kitty");
+                assert_eq!(this.shortcut_apps[1].read(cx).value(), "ChatGPT");
                 this.shortcut_key
                     .update(cx, |input, cx| input.set_value("Cmd+L", window, cx));
-                this.shortcut_app
+                this.shortcut_apps[0]
                     .update(cx, |input, cx| input.set_value("Browser", window, cx));
                 let saved = this.values(cx).unwrap();
                 assert_eq!(saved.shortcuts.len(), 1);
-                assert_eq!(saved.shortcuts[0].application, "Browser");
+                assert_eq!(saved.shortcuts[0].applications, vec!["Browser", "ChatGPT"]);
                 assert!(!saved.shortcuts[0].enabled);
+                this.add_shortcut(window, cx);
+                assert_eq!(this.draft.shortcuts, saved.shortcuts);
+                assert!(this.editing_shortcut.is_none());
             })
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn adding_and_removing_targets_keeps_other_inputs_and_picker_independent(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, settings) = fixture(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            settings.update(cx, |this, cx| {
+                this.shortcut_key
+                    .update(cx, |input, cx| input.set_value("Cmd+Enter", window, cx));
+                this.shortcut_apps[0].update(cx, |input, cx| input.set_value("kitty", window, cx));
+                this.add_shortcut_app(window, cx);
+                assert!(
+                    this.values(cx).is_err(),
+                    "empty target rows must be filled or removed"
+                );
+                this.apps.push(Application {
+                    id: "chatgpt".into(),
+                    name: "ChatGPT".into(),
+                    path: PathBuf::from("/Applications/ChatGPT.app"),
+                    aliases: vec![],
+                });
+                this.choose_app(this.shortcut_apps[1].clone(), window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.click("chatgpt", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            settings.update(cx, |this, cx| {
+                assert!(this.picker.is_none());
+                assert_eq!(
+                    this.values(cx).unwrap().shortcuts[0].applications,
+                    vec!["kitty", "/Applications/ChatGPT.app"]
+                );
+            });
+            window.scroll(
+                "终端应用",
+                ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window
+                .within(("shortcut-app", 0usize))
+                .click(("remove-shortcut-app", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, _, cx| {
+            settings.update(cx, |this, cx| {
+                assert_eq!(this.shortcut_apps.len(), 1);
+                assert_eq!(
+                    this.values(cx).unwrap().shortcuts[0].applications,
+                    vec!["/Applications/ChatGPT.app"]
+                );
+            });
         })
         .unwrap();
     }

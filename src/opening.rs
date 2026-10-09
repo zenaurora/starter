@@ -52,6 +52,39 @@ pub fn launch(application: &str) -> Result<()> {
     run(application_command(application))
 }
 
+/// Submit all launches together and report failures after every target is attempted.
+pub fn launch_all(applications: &[String]) -> Result<()> {
+    launch_all_with(applications, launch)
+}
+
+fn launch_all_with(
+    applications: &[String],
+    launch: impl Fn(&str) -> Result<()> + Sync,
+) -> Result<()> {
+    ensure!(!applications.is_empty(), "请选择至少一个应用");
+    let failures = std::thread::scope(|scope| {
+        let jobs = applications
+            .iter()
+            .map(|application| {
+                let launch = &launch;
+                (application, scope.spawn(move || launch(application)))
+            })
+            .collect::<Vec<_>>();
+        jobs.into_iter()
+            .filter_map(|(application, job)| {
+                let result = job
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("应用启动线程异常")));
+                result
+                    .err()
+                    .map(|error| format!("{application}：{error:#}"))
+            })
+            .collect::<Vec<_>>()
+    });
+    ensure!(failures.is_empty(), "{}", failures.join("；"));
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn shell_open(application: &str, path: Option<&Path>) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -123,6 +156,51 @@ fn run(mut command: Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_launch_attempts_every_app_and_reports_each_failure() {
+        use std::sync::Mutex;
+        let attempted = Mutex::new(Vec::new());
+        let apps = vec!["kitty".into(), "Missing".into(), "ChatGPT".into()];
+        let error = launch_all_with(&apps, |app| {
+            attempted.lock().unwrap().push(app.to_string());
+            if app == "Missing" || app == "kitty" {
+                anyhow::bail!("not installed");
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        let mut attempted = attempted.into_inner().unwrap();
+        attempted.sort();
+        assert_eq!(attempted, vec!["ChatGPT", "Missing", "kitty"]);
+        assert_eq!(
+            error.to_string(),
+            "kitty：not installed；Missing：not installed"
+        );
+        assert!(launch_all_with(&apps, |_| Ok(())).is_ok());
+        assert!(launch_all_with(&[], |_| panic!("empty groups must not launch")).is_err());
+    }
+
+    #[test]
+    fn group_targets_start_without_waiting_for_another_launch_to_finish() {
+        use std::sync::{Mutex, mpsc};
+        use std::time::Duration;
+        let (sender, receiver) = mpsc::channel();
+        let receiver = Mutex::new(receiver);
+        launch_all_with(&["kitty".into(), "ChatGPT".into()], |app| {
+            if app == "kitty" {
+                receiver
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))?;
+            } else {
+                sender.send(())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn specific_file_rule_overrides_fallback_and_folder_is_independent() {
         let mut config = Config::default();

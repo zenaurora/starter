@@ -19,7 +19,7 @@ use tray_icon::{
 pub enum Event {
     Toggle,
     Terminal,
-    Application(String),
+    Applications(Vec<String>),
     OpenSettings,
     OpenReminders,
     OpenSystem,
@@ -116,7 +116,7 @@ impl Shell {
             .map(|(_, action)| match action {
                 Action::Toggle => Event::Toggle,
                 Action::Terminal => Event::Terminal,
-                Action::Application(app) => Event::Application(app.clone()),
+                Action::Applications(apps) => Event::Applications(apps.clone()),
             })
     }
 

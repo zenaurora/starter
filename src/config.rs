@@ -62,9 +62,26 @@ impl Default for Config {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AppShortcut {
     pub hotkey: String,
-    pub application: String,
+    /// Accept the single-app field used by older configurations.
+    #[serde(alias = "application", deserialize_with = "shortcut_applications")]
+    pub applications: Vec<String>,
     #[serde(default = "enabled")]
     pub enabled: bool,
+}
+
+fn shortcut_applications<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Applications {
+        Single(String),
+        Multiple(Vec<String>),
+    }
+    Ok(match Applications::deserialize(deserializer)? {
+        Applications::Single(application) => vec![application],
+        Applications::Multiple(applications) => applications,
+    })
 }
 
 fn enabled() -> bool {
@@ -156,6 +173,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn single_app_shortcuts_migrate_to_application_lists() {
+        let legacy: Config = toml::from_str(
+            "[[shortcuts]]\nhotkey = 'Cmd+Enter'\napplication = 'kitty'\nenabled = false",
+        )
+        .unwrap();
+        assert_eq!(legacy.shortcuts[0].applications, vec!["kitty"]);
+        assert!(!legacy.shortcuts[0].enabled);
+        let saved = toml::to_string_pretty(&legacy).unwrap();
+        assert!(saved.contains("applications = ["));
+        assert!(!saved.contains("application ="));
+        let migrated: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(migrated.shortcuts, legacy.shortcuts);
+
+        let group: Config = toml::from_str(
+            "[[shortcuts]]\nhotkey = 'Cmd+Enter'\napplications = ['kitty', 'ChatGPT']",
+        )
+        .unwrap();
+        assert_eq!(group.shortcuts[0].applications, vec!["kitty", "ChatGPT"]);
+        assert!(group.shortcuts[0].enabled);
+        assert!(toml::from_str::<Config>(
+            "[[shortcuts]]\nhotkey = 'Cmd+Enter'\napplication = 'kitty'\napplications = ['ChatGPT']"
+        ).is_err());
+    }
+
+    #[test]
     fn settings_save_roundtrip_and_legacy_defaults() {
         let path = std::env::temp_dir()
             .join(format!("starter-settings-{}", std::process::id()))
@@ -176,7 +218,7 @@ mod tests {
         config.open_with.insert("md".into(), "Editor".into());
         config.shortcuts.push(AppShortcut {
             hotkey: "Cmd+K".into(),
-            application: "Editor".into(),
+            applications: vec!["Editor".into(), "Browser".into()],
             enabled: false,
         });
         save(&path, &config).unwrap();

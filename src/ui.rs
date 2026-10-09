@@ -800,13 +800,20 @@ impl Launcher {
                     self.show(window, cx);
                 }
             },
-            ShellEvent::Application(application) => match opening::launch(&application) {
-                Ok(()) => self.hide(window, cx),
-                Err(problem) => {
-                    self.status = format!("应用打开失败：{problem:#}");
-                    self.show(window, cx);
-                }
-            },
+            ShellEvent::Applications(applications) => {
+                self.hide(window, cx);
+                let job = cx
+                    .background_executor()
+                    .spawn(async move { opening::launch_all(&applications) });
+                self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+                    if let Err(problem) = job.await {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.status = format!("应用打开失败：{problem:#}");
+                            this.show(window, cx);
+                        });
+                    }
+                }));
+            }
             ShellEvent::OpenSettings => self.open_settings(window, cx),
             ShellEvent::OpenConfig => {
                 if let Err(problem) = platform::open_target(&self.config_path) {

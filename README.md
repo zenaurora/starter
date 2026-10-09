@@ -59,7 +59,7 @@ Click mode buttons to browse by category. `↑↓` to select, `Enter` to open, `
 
 Open settings with the gear icon, `⌘,` / `Ctrl+,`, or via the tray menu.
 
-- **Hotkeys** — customize launcher, terminal, and per-app shortcuts with a visual key picker
+- **Hotkeys** — customize launcher, terminal, and app shortcuts with a visual key picker; one shortcut can open multiple apps together (for example, `Cmd+Enter` opens kitty and ChatGPT)
 - **File associations** — set which app opens which file extension from search results
 - **Appearance** — pick a theme (Catppuccin Mocha, Everforest, Gruvbox, Latte) and monospace font
 - **Search directories** — add folders to index for file search
@@ -68,6 +68,17 @@ Open settings with the gear icon, `⌘,` / `Ctrl+,`, or via the tray menu.
 - **Clipboard** — toggle history recording; clear all or delete individual entries
 
 Changes apply immediately. No restart needed.
+
+In the app shortcut editor, use **添加应用** to add targets to the same shortcut, then save. Existing single-app shortcuts continue to work. If one target fails to launch, the other apps still open and Starter reports the failed targets.
+
+You can also configure a group in `config.toml`:
+
+```toml
+[[shortcuts]]
+hotkey = "Super+Enter"
+applications = ["kitty", "ChatGPT"]
+enabled = true
+```
 
 ## How it works
 

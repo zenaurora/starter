@@ -10,7 +10,7 @@ use std::{
 pub enum Action {
     Toggle,
     Terminal,
-    Application(String),
+    Applications(Vec<String>),
 }
 
 /// Canonical syntax also accepts familiar labels typed in settings.
@@ -94,13 +94,24 @@ pub fn bindings(config: &Config) -> Result<Vec<(HotKey, Action)>> {
     }
     for shortcut in config.shortcuts.iter().filter(|shortcut| shortcut.enabled) {
         ensure!(
-            !shortcut.application.trim().is_empty(),
-            "请选择快捷键要打开的应用"
+            !shortcut.applications.is_empty()
+                && shortcut
+                    .applications
+                    .iter()
+                    .all(|app| !app.trim().is_empty()),
+            "请为快捷键选择至少一个应用，并填写所有目标应用"
         );
-        bindings.push((
-            parse(&shortcut.hotkey)?,
-            Action::Application(shortcut.application.clone()),
-        ));
+        let applications = shortcut
+            .applications
+            .iter()
+            .map(|app| app.trim().to_string())
+            .collect::<Vec<_>>();
+        let mut seen_apps = HashSet::new();
+        ensure!(
+            applications.iter().all(|app| seen_apps.insert(app)),
+            "同一快捷键的目标应用不能重复"
+        );
+        bindings.push((parse(&shortcut.hotkey)?, Action::Applications(applications)));
     }
     let mut seen = HashMap::new();
     for (key, action) in &bindings {
@@ -159,6 +170,33 @@ pub fn reconcile(
 mod tests {
     use super::*;
     use crate::config::AppShortcut;
+
+    #[test]
+    fn one_binding_carries_all_targets_and_rejects_invalid_groups() {
+        let mut config = Config::default();
+        config.shortcuts.push(AppShortcut {
+            hotkey: "Cmd+Enter".into(),
+            applications: vec![" kitty ".into(), "ChatGPT".into()],
+            enabled: true,
+        });
+        let registered = bindings(&config).unwrap();
+        assert_eq!(registered.len(), 3);
+        assert_eq!(
+            registered[2].1,
+            Action::Applications(vec!["kitty".into(), "ChatGPT".into()])
+        );
+        for applications in [
+            vec![],
+            vec![" ".into()],
+            vec!["kitty".into(), "".into()],
+            vec!["kitty".into(), " kitty ".into()],
+        ] {
+            config.shortcuts[0].applications = applications;
+            assert!(bindings(&config).is_err());
+        }
+        config.shortcuts[0].enabled = false;
+        assert_eq!(bindings(&config).unwrap().len(), 2);
+    }
 
     #[test]
     fn visual_choices_roundtrip_aliases_and_validate_combinations() {
@@ -246,7 +284,7 @@ mod tests {
         let mut config = Config::default();
         config.shortcuts.push(AppShortcut {
             hotkey: config.launcher_hotkey.clone(),
-            application: "Editor".into(),
+            applications: vec!["Editor".into()],
             enabled: true,
         });
         assert!(bindings(&config).is_err());
@@ -256,7 +294,7 @@ mod tests {
         config.shortcuts[0].hotkey = "Cmd+K".into();
         assert_eq!(
             bindings(&config).unwrap()[2].1,
-            Action::Application("Editor".into())
+            Action::Applications(vec!["Editor".into()])
         );
         config.shortcuts[0].hotkey = "K".into();
         assert!(bindings(&config).is_err());
