@@ -51,8 +51,12 @@ fn main() {
             window_bounds: Some(WindowBounds::centered(size(px(720.), px(560.)), cx)),
             // 不使用系统标题栏（采用自定义标题栏）
             titlebar: None,
-            // 窗口类型为弹出式（常用作 Spotlight 风格的启动器）
-            kind: WindowKind::PopUp,
+            // macOS 菜单级弹窗会遮住输入法候选框，使用可激活的浮动窗口。
+            kind: if cfg!(target_os = "macos") {
+                WindowKind::Floating
+            } else {
+                WindowKind::PopUp
+            },
             // 禁止用户调整窗口大小
             is_resizable: false,
             // 禁止最小化窗口
@@ -63,6 +67,7 @@ fn main() {
             ..Default::default()
         };
         match gpui_kit::open_window(options, cx, |window, cx| {
+            platform::configure_launcher_window(window);
             cx.new(|cx| ui::Launcher::new(window, cx))
         }) {
             Ok(_) => {

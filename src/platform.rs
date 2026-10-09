@@ -181,6 +181,34 @@ pub fn reveal(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Preserve launcher access across macOS Spaces when using an activating floating panel.
+pub fn configure_launcher_window(window: &Window) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{msg_send, runtime::AnyObject};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        if let Ok(handle) = HasWindowHandle::window_handle(window)
+            && let RawWindowHandle::AppKit(handle) = handle.as_raw()
+        {
+            // SAFETY: GPUI owns this live NSView and its NSWindow. Window creation
+            // runs on the main thread; these borrowed pointers stay in this callback.
+            unsafe {
+                let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+                let native_window: *mut AnyObject = msg_send![view, window];
+                if let Some(native_window) = native_window.as_ref() {
+                    // NSWindowCollectionBehaviorCanJoinAllSpaces and FullScreenAuxiliary.
+                    // GPUI sets these for PopUp windows but not Floating windows.
+                    let behavior: usize = msg_send![native_window, collectionBehavior];
+                    let _: () = msg_send![native_window, setCollectionBehavior: behavior | (1 << 0) | (1 << 8)];
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
 pub fn hide(window: &mut Window, cx: &mut App) {
     #[cfg(target_os = "windows")]
     {
