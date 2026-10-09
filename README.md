@@ -4,6 +4,8 @@ A native desktop launcher built with Rust and GPU rendering. Fast, lightweight, 
 
 **macOS** `Option+Space` · **Windows** `Ctrl+Space`
 
+[Starter 0.4.0 release notes](docs/releases/0.4.0.md)
+
 ## What it does
 
 Launch apps, search files, grab clipboard history, and manage quick reminders — all from one floating window that stays out of your way.
