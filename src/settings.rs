@@ -1,5 +1,5 @@
 mod hotkey_editor;
-use hotkey_editor::HotkeyEditor;
+use hotkey_editor::{HotkeyEditor, key_label};
 
 use crate::appearance;
 use gpui_kit::assets::IconName;
@@ -43,10 +43,17 @@ enum Tab {
     Clipboard,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuiltinHotkey {
+    Launcher,
+    Terminal,
+}
+
 pub struct Settings {
     draft: Config,
     tab: Tab,
     focus: FocusHandle,
+    content_scroll: ScrollHandle,
     launcher: Entity<HotkeyEditor>,
     terminal_key: Entity<HotkeyEditor>,
     terminal: Entity<InputState>,
@@ -62,6 +69,8 @@ pub struct Settings {
     picker: Option<Entity<InputState>>,
     app_search: Entity<InputState>,
     editing_shortcut: Option<usize>,
+    editing_builtin: Option<BuiltinHotkey>,
+    shortcut_editor_open: bool,
     _subscriptions: Vec<Subscription>,
     pub error: Option<String>,
     pub update_status: UpdateStatus,
@@ -91,10 +100,12 @@ impl Settings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let launcher =
-            cx.new(|cx| HotkeyEditor::new("呼出快捷键", &config.launcher_hotkey, window, cx));
-        let terminal_key =
-            cx.new(|cx| HotkeyEditor::new("终端直达快捷键", &config.terminal_hotkey, window, cx));
+        let launcher = cx.new(|cx| {
+            HotkeyEditor::new("呼出快捷键", &config.launcher_hotkey, window, cx).without_label()
+        });
+        let terminal_key = cx.new(|cx| {
+            HotkeyEditor::new("终端直达快捷键", &config.terminal_hotkey, window, cx).without_label()
+        });
         let terminal =
             cx.new(|cx| InputState::new(window, cx).default_value(config.terminal.clone()));
         let font =
@@ -113,7 +124,8 @@ impl Settings {
         });
         let alias_app = cx.new(|cx| InputState::new(window, cx).placeholder("例如 Terminal"));
         let alias_names = cx.new(|cx| InputState::new(window, cx).placeholder("term, 终端"));
-        let shortcut_key = cx.new(|cx| HotkeyEditor::new("应用快捷键", "", window, cx));
+        let shortcut_key =
+            cx.new(|cx| HotkeyEditor::new("应用快捷键", "", window, cx).without_label());
         let shortcut_app =
             cx.new(|cx| InputState::new(window, cx).placeholder("选择应用，或填写名称/路径"));
         let rule = cx.new(|cx| InputState::new(window, cx).placeholder("md / pdf / folder / *"));
@@ -130,6 +142,7 @@ impl Settings {
             draft: config.clone(),
             tab: Tab::General,
             focus,
+            content_scroll: ScrollHandle::new(),
             launcher,
             terminal_key,
             terminal,
@@ -145,6 +158,8 @@ impl Settings {
             picker: None,
             app_search,
             editing_shortcut: None,
+            editing_builtin: None,
+            shortcut_editor_open: false,
             _subscriptions: vec![subscription],
             error: None,
             update_status: UpdateStatus::Idle,
@@ -290,7 +305,11 @@ impl Settings {
         }
         if event.keystroke.key == "escape" {
             if self.picker.take().is_some() {
+                window.focus(&self.focus, cx);
+                self.content_scroll.set_offset(Point::default());
                 cx.notify();
+            } else if self.tab == Tab::General && self.shortcut_editor_open {
+                self.cancel_shortcut(window, cx);
             } else {
                 cx.emit(Event::Close);
             }
@@ -367,7 +386,31 @@ impl Settings {
         });
         self.set_shortcut_apps(&shortcut.applications, window, cx);
         self.editing_shortcut = Some(index);
+        self.shortcut_editor_open = true;
+        self.editing_builtin = None;
+        self.content_scroll.set_offset(Point::default());
         self.error = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn new_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_shortcut(window, cx);
+        self.shortcut_editor_open = true;
+        self.editing_builtin = None;
+        cx.notify();
+    }
+
+    fn cancel_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.shortcut_key
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.set_shortcut_apps(&[], window, cx);
+        self.editing_shortcut = None;
+        self.shortcut_editor_open = false;
+        self.content_scroll.set_offset(Point::default());
+        self.picker = None;
+        self.error = None;
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -414,6 +457,9 @@ impl Settings {
                 self.shortcut_key
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 self.set_shortcut_apps(&[], window, cx);
+                self.shortcut_editor_open = false;
+                self.content_scroll.set_offset(Point::default());
+                window.focus(&self.focus, cx);
                 self.error = None;
             }
             Err(error) => self.error = Some(format!("{error:#}")),
@@ -449,6 +495,7 @@ impl Settings {
         cx: &mut Context<Self>,
     ) {
         self.picker = Some(input);
+        self.content_scroll.set_offset(Point::default());
         self.app_search.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.focus(window, cx);
@@ -472,7 +519,8 @@ impl Settings {
                 match result {
                     Ok(Ok(Some(paths))) if !paths.is_empty() => {
                         input.update(cx, |input, cx| {
-                            input.set_value(paths[0].display().to_string(), window, cx)
+                            input.set_value(paths[0].display().to_string(), window, cx);
+                            input.focus(window, cx);
                         });
                         this.picker = None;
                     }
@@ -542,7 +590,10 @@ impl Settings {
                     .ghost()
                     .small()
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        input.update(cx, |input, cx| input.set_value(path.clone(), window, cx));
+                        input.update(cx, |input, cx| {
+                            input.set_value(path.clone(), window, cx);
+                            input.focus(window, cx);
+                        });
                         this.picker = None;
                         cx.notify();
                     })),
@@ -561,8 +612,9 @@ impl Settings {
                     Button::new("close-picker")
                         .label("收起")
                         .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.picker = None;
+                            window.focus(&this.focus, cx);
                             cx.notify();
                         })),
                 ),
@@ -571,24 +623,44 @@ impl Settings {
     }
 
     fn shortcut_app_fields(&self, cx: &Context<Self>) -> AnyElement {
-        let mut fields = div().flex().flex_col().gap_3();
+        let mut fields = div().flex().flex_col().gap_2();
         for (i, input) in self.shortcut_apps.iter().enumerate() {
+            let target = input.clone();
             fields = fields.child(
                 div()
                     .id(("shortcut-app", i))
                     .flex()
-                    .items_end()
+                    .items_center()
                     .gap_2()
                     .child(
                         div()
+                            .w(px(16.))
+                            .flex_shrink_0()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child((i + 1).to_string()),
+                    )
+                    .child(
+                        Input::new(input)
+                            .aria_label(format!("目标应用 {}", i + 1))
                             .flex_1()
-                            .min_w_0()
-                            .child(self.app_field("目标应用", input, cx)),
+                            .min_w_0(),
+                    )
+                    .child(
+                        Button::new("choose-shortcut-app")
+                            .label("选择")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.choose_app(target.clone(), window, cx)
+                            })),
                     )
                     .child(
                         Button::new(("remove-shortcut-app", i))
-                            .icon(IconName::X)
+                            .label("移除")
                             .ghost()
+                            .small()
+                            .tooltip("移除这个应用")
                             .disabled(self.shortcut_apps.len() == 1)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.shortcut_apps.remove(i);
@@ -600,9 +672,430 @@ impl Settings {
         fields
             .child(
                 Button::new("add-shortcut-app")
-                    .label("添加应用")
+                    .label("＋ 添加应用")
                     .ghost()
+                    .small()
                     .on_click(cx.listener(|this, _, window, cx| this.add_shortcut_app(window, cx))),
+            )
+            .into_any_element()
+    }
+
+    fn app_name(&self, application: &str) -> String {
+        if let Some(app) = self
+            .apps
+            .iter()
+            .find(|app| app.path.to_str() == Some(application))
+        {
+            return app.name.clone();
+        }
+        let path = std::path::Path::new(application);
+        if application.contains(['/', '\\']) || path.extension().is_some() {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or(application)
+                .to_string()
+        } else {
+            application.to_string()
+        }
+    }
+
+    fn hotkey_badges(value: &str, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        if value.trim().is_empty() {
+            return div()
+                .text_size(px(11.))
+                .text_color(theme.muted_foreground)
+                .child("未启用")
+                .into_any_element();
+        }
+        let parts = hotkeys::parts(value).unwrap_or_else(|_| vec![value.to_string()]);
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .children(parts.iter().map(|part| {
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(key_label(part))
+            }))
+            .into_any_element()
+    }
+
+    fn builtin_hotkey_row(&self, kind: BuiltinHotkey, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (title, description, editor, id) = match kind {
+            BuiltinHotkey::Launcher => (
+                "呼出 Starter",
+                "打开或收起搜索窗口".to_string(),
+                &self.launcher,
+                "edit-launcher-hotkey",
+            ),
+            BuiltinHotkey::Terminal => (
+                "打开终端",
+                self.app_name(&self.terminal.read(cx).value()),
+                &self.terminal_key,
+                "edit-terminal-hotkey",
+            ),
+        };
+        let expanded = self.editing_builtin == Some(kind);
+        let value = editor.read(cx).value(cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.muted_foreground)
+                                    .text_ellipsis()
+                                    .child(description),
+                            ),
+                    )
+                    .when(!expanded, |row| {
+                        row.child(Self::hotkey_badges(
+                            value.as_deref().unwrap_or("待完善"),
+                            cx,
+                        ))
+                    })
+                    .child(
+                        Button::new(id)
+                            .label(if expanded { "收起" } else { "修改" })
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.editing_builtin = if this.editing_builtin == Some(kind) {
+                                    None
+                                } else {
+                                    Some(kind)
+                                };
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(expanded, |body| {
+                body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .pt_3()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(editor.clone())
+                        .when(kind == BuiltinHotkey::Terminal, |body| {
+                            body.child(self.app_field("终端应用", &self.terminal, cx))
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(theme.muted_foreground)
+                                        .child("清空组合键可停用终端快捷键。"),
+                                )
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn hotkey_overview(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let mut list = div().flex().flex_col();
+        for (i, shortcut) in self.draft.shortcuts.iter().enumerate() {
+            let names = shortcut
+                .applications
+                .iter()
+                .map(|app| self.app_name(app))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            list = list.child(
+                div()
+                    .id(("shortcut-group", i))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .py_3()
+                    .when(i > 0, |row| row.border_t_1().border_color(theme.border))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if shortcut.enabled {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .text_ellipsis()
+                                    .child(names),
+                            )
+                            .child(
+                                Switch::new(("shortcut-enabled", i))
+                                    .checked(shortcut.enabled)
+                                    .on_change(cx.listener(move |this, checked, _, cx| {
+                                        this.draft.shortcuts[i].enabled = *checked;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(Self::hotkey_badges(&shortcut.hotkey, cx))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(11.))
+                                    .text_color(theme.muted_foreground)
+                                    .child(if shortcut.enabled {
+                                        format!("{} 个应用", shortcut.applications.len())
+                                    } else {
+                                        "已停用".to_string()
+                                    }),
+                            )
+                            .child(
+                                Button::new(("edit-shortcut", i))
+                                    .label("编辑")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.edit_shortcut(i, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("remove-shortcut", i))
+                                    .label("删除")
+                                    .ghost()
+                                    .small()
+                                    .text_color(theme.muted_foreground)
+                                    .tooltip("删除这组快捷键")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.draft.shortcuts.remove(i);
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Starter 入口"),
+                    )
+                    .child(
+                        div()
+                            .rounded_lg()
+                            .bg(theme.muted)
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(self.builtin_hotkey_row(BuiltinHotkey::Launcher, cx))
+                            .child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(theme.border)
+                                    .pt_3()
+                                    .child(self.builtin_hotkey_row(BuiltinHotkey::Terminal, cx)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("应用快捷键"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(11.))
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{} 组", self.draft.shortcuts.len())),
+                            )
+                            .child(
+                                Button::new("new-shortcut")
+                                    .label("＋ 新建")
+                                    .outline()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.new_shortcut(window, cx)
+                                    })),
+                            ),
+                    )
+                    .when(self.draft.shortcuts.is_empty(), |body| {
+                        body.child(
+                            div()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .p_4()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("把常用应用放进一组快捷键"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(theme.muted_foreground)
+                                        .child("例如一次打开 kitty 和 ChatGPT。点击「新建」开始。"),
+                                ),
+                        )
+                    })
+                    .when(!self.draft.shortcuts.is_empty(), |body| body.child(list)),
+            )
+            .into_any_element()
+    }
+
+    fn shortcut_editor(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        Button::new("cancel-shortcut")
+                            .label("取消编辑")
+                            .tooltip("放弃本次编辑，返回快捷键列表")
+                            .ghost()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.cancel_shortcut(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("add-shortcut")
+                            .label(if self.editing_shortcut.is_some() {
+                                "更新列表"
+                            } else {
+                                "加入列表"
+                            })
+                            .outline()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_shortcut(window, cx)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .rounded_lg()
+                    .bg(theme.muted)
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("按下什么"),
+                    )
+                    .child(self.shortcut_key.clone())
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.muted_foreground)
+                            .child("选择一个普通按键和修饰键；＋ 可增加修饰键。"),
+                    ),
+            )
+            .child(
+                div()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("打开哪些应用"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{} 个目标", self.shortcut_apps.len())),
+                            ),
+                    )
+                    .child(self.shortcut_app_fields(cx))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.muted_foreground)
+                            .child("这些应用会同时打开。可选择已安装的应用，或填写名称／路径。"),
+                    ),
             )
             .into_any_element()
     }
@@ -672,36 +1165,11 @@ impl Settings {
                     .child("点击更新后自动下载、校验、安装并重新启动。配置和使用记录会保留。"))
                 .into_any_element(),
             Tab::General => {
-                let mut list = div().flex().flex_col().gap_2();
-                for (i, shortcut) in self.draft.shortcuts.iter().enumerate() {
-                    list = list.child(div().flex().items_center().gap_2().py_2().border_b_1().border_color(theme.border)
-                        .child(Switch::new(("shortcut-enabled", i)).checked(shortcut.enabled).on_change(cx.listener(move |this, checked, _, cx| { this.draft.shortcuts[i].enabled = *checked; cx.notify(); })))
-                        .child(div().flex_1().min_w_0().flex().flex_col().gap_1().child(shortcut.hotkey.clone()).child(div().text_size(px(11.)).text_ellipsis().child(shortcut.applications.join("、"))))
-                        .child(Button::new(("edit-shortcut", i)).label("编辑").ghost().small().on_click(cx.listener(move |this, _, window, cx| {
-                            this.edit_shortcut(i, window, cx);
-                        })))
-                        .child(Button::new(("remove-shortcut", i)).icon(IconName::X).ghost().small().on_click(cx.listener(move |this, _, window, cx| {
-                            this.draft.shortcuts.remove(i);
-                            if this.editing_shortcut.take().is_some() {
-                                this.shortcut_key.update(cx, |input, cx| input.set_value("", window, cx));
-                                this.set_shortcut_apps(&[], window, cx);
-                            }
-                            cx.notify();
-                        }))));
+                if self.shortcut_editor_open {
+                    self.shortcut_editor(cx)
+                } else {
+                    self.hotkey_overview(cx)
                 }
-                body.gap_3()
-                    .child(self.launcher.clone())
-                    .child(self.terminal_key.clone())
-                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child("点击格子选择按键，＋ 增加格子，× 移除。组合由一个普通按键和修饰键组成，最多 5 格。终端快捷键清空可停用。"))
-                    .child(self.app_field("终端应用", &self.terminal, cx))
-                    .child(div().mt_3().font_weight(FontWeight::MEDIUM).child("打开应用的全局快捷键"))
-                    .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child("一个快捷键可同时打开多个应用。例如 Cmd+Enter 打开 kitty 和 ChatGPT，点击「添加应用」增加目标。"))
-                    .child(list)
-                    .child(self.shortcut_key.clone())
-                    .child(self.shortcut_app_fields(cx))
-                    .child(Button::new("add-shortcut").label(if self.editing_shortcut.is_some() { "更新快捷键" } else { "添加快捷键" }).on_click(cx.listener(|this, _, window, cx| this.add_shortcut(window, cx))))
-                    .child(self.picker_content(cx))
-                    .into_any_element()
             }
             Tab::Opening => {
                 let mut list = div().flex().flex_col().gap_2();
@@ -792,7 +1260,15 @@ impl Render for Settings {
         ];
         let titles = match self.tab {
             Tab::Opening => ("打开方式", "为文件和文件夹指定常用应用。"),
-            Tab::General => ("快捷键", "把常用动作缩短到一次按键。"),
+            Tab::General if self.shortcut_editor_open => (
+                if self.editing_shortcut.is_some() {
+                    "编辑应用快捷键"
+                } else {
+                    "新建应用快捷键"
+                },
+                "一次按键，打开一个或多个应用。",
+            ),
+            Tab::General => ("快捷键", "管理 Starter 的入口和应用启动组合。"),
             Tab::Appearance => ("外观", "熟悉的编辑器配色，安静的桌面入口。"),
             Tab::Search => ("搜索目录", "限定搜索范围，保持轻量。"),
             Tab::Aliases => ("应用别名", "用你习惯的名字打开应用。"),
@@ -863,6 +1339,7 @@ impl Render for Settings {
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.picker = None;
                                         this.tab = tab;
+                                        this.content_scroll.set_offset(Point::default());
                                         window.focus(&this.focus, cx);
                                         this.error = None;
                                         cx.notify();
@@ -885,6 +1362,7 @@ impl Render for Settings {
                             .min_w_0()
                             .p_5()
                             .overflow_y_scroll()
+                            .track_scroll(&self.content_scroll)
                             .flex()
                             .flex_col()
                             .gap_1()
@@ -898,7 +1376,7 @@ impl Render for Settings {
                                 div()
                                     .text_size(px(12.))
                                     .text_color(theme.muted_foreground)
-                                    .mb_4()
+                                    .mb_3()
                                     .child(titles.1),
                             )
                             .child(self.content(cx)),
@@ -936,6 +1414,17 @@ impl Render for Settings {
                         div()
                             .flex()
                             .gap_2()
+                            .when(self.tab == Tab::General, |row| {
+                                row.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .mr_2()
+                                        .text_size(px(11.))
+                                        .text_color(theme.muted_foreground)
+                                        .child("保存后生效"),
+                                )
+                            })
                             .child(
                                 Button::new("cancel")
                                     .label("取消")
@@ -945,6 +1434,7 @@ impl Render for Settings {
                             .child(
                                 Button::new("save")
                                     .label("保存设置")
+                                    .tooltip("保存所有修改并立即生效")
                                     .primary()
                                     .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                             ),
@@ -977,6 +1467,90 @@ mod tests {
             .unwrap()
         });
         (handle.downcast().unwrap(), settings)
+    }
+
+    #[gpui_kit::test]
+    fn overview_opens_only_the_requested_editor_and_cancel_discards_pending_targets(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, settings) = fixture(cx);
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("edit-terminal-hotkey", cx);
+            assert_eq!(
+                settings.read(cx).editing_builtin,
+                Some(BuiltinHotkey::Terminal)
+            );
+            window.click("edit-launcher-hotkey", cx);
+            assert_eq!(
+                settings.read(cx).editing_builtin,
+                Some(BuiltinHotkey::Launcher)
+            );
+            window.click("new-shortcut", cx);
+            settings.update(cx, |this, cx| {
+                assert!(this.shortcut_editor_open);
+                assert!(this.editing_builtin.is_none());
+                this.shortcut_key
+                    .update(cx, |input, cx| input.set_value("Cmd+Enter", window, cx));
+                this.set_shortcut_apps(&["kitty".into(), "ChatGPT".into()], window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("cancel-shortcut", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, _, cx| {
+            settings.update(cx, |this, cx| {
+                assert!(!this.shortcut_editor_open);
+                assert!(this.values(cx).unwrap().shortcuts.is_empty());
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn adding_a_group_returns_to_overview_and_escape_cancels_later_edits(cx: &mut TestAppContext) {
+        let (handle, settings) = fixture(cx);
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("new-shortcut", cx);
+            settings.update(cx, |this, cx| {
+                this.shortcut_key
+                    .update(cx, |input, cx| input.set_value("Cmd+Enter", window, cx));
+                this.set_shortcut_apps(&["kitty".into(), "ChatGPT".into()], window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("add-shortcut", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(!settings.read(cx).shortcut_editor_open);
+            window.click(("edit-shortcut", 0usize), cx);
+            settings.update(cx, |this, cx| {
+                this.shortcut_apps[0]
+                    .update(cx, |input, cx| input.set_value("Changed", window, cx));
+            });
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, _, cx| {
+            settings.update(cx, |this, cx| {
+                assert!(!this.shortcut_editor_open);
+                assert_eq!(
+                    this.values(cx).unwrap().shortcuts[0].applications,
+                    vec!["kitty", "ChatGPT"]
+                );
+            });
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -1101,6 +1675,7 @@ mod tests {
         let (handle, settings) = fixture(cx);
         cx.update_window(handle.into(), |_, window, cx| {
             settings.update(cx, |this, cx| {
+                this.new_shortcut(window, cx);
                 this.shortcut_key
                     .update(cx, |input, cx| input.set_value("Cmd+Enter", window, cx));
                 this.shortcut_apps[0].update(cx, |input, cx| input.set_value("kitty", window, cx));
@@ -1132,7 +1707,7 @@ mod tests {
                 );
             });
             window.scroll(
-                "终端应用",
+                "add-shortcut-app",
                 ScrollDelta::Pixels(point(px(0.), px(-1000.))),
                 cx,
             );

@@ -262,6 +262,7 @@ fn escape_closes_key_dropdown_before_settings_and_cancel_preserves_keys(cx: &mut
     .unwrap();
     cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, cx| {
+        window.click("edit-launcher-hotkey", cx);
         window
             .within("呼出快捷键")
             .within(("key-slot", 0usize))

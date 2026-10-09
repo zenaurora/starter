@@ -4,6 +4,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     },
+    prelude::FluentBuilder,
     *,
 };
 use starter::hotkeys;
@@ -41,6 +42,7 @@ type KeySelect = SelectState<SearchableVec<KeyChoice>>;
 /// Click-only combo builder. Configuration is changed only by its caller on save.
 pub struct HotkeyEditor {
     label: &'static str,
+    show_label: bool,
     slots: Vec<Entity<KeySelect>>,
     subscriptions: Vec<Subscription>,
 }
@@ -54,11 +56,17 @@ impl HotkeyEditor {
     ) -> Self {
         let mut editor = Self {
             label,
+            show_label: true,
             slots: Vec::new(),
             subscriptions: Vec::new(),
         };
         editor.set_value(value, window, cx);
         editor
+    }
+
+    pub fn without_label(mut self) -> Self {
+        self.show_label = false;
+        self
     }
 
     pub fn value(&self, cx: &App) -> anyhow::Result<String> {
@@ -198,7 +206,14 @@ impl Render for HotkeyEditor {
             .flex()
             .flex_col()
             .gap_2()
-            .child(self.label)
+            .when(self.show_label, |body| {
+                body.child(
+                    div()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(self.label),
+                )
+            })
             .child(row)
             .child(
                 div()
@@ -213,7 +228,7 @@ impl Render for HotkeyEditor {
     }
 }
 
-fn key_label(value: &str) -> String {
+pub(super) fn key_label(value: &str) -> String {
     match value {
         "Super" => {
             if cfg!(target_os = "macos") {
