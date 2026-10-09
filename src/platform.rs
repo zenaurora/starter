@@ -18,7 +18,6 @@ use tray_icon::{
 #[derive(Clone, Debug)]
 pub enum Event {
     Toggle,
-    Terminal,
     Applications(Vec<String>),
     OpenSettings,
     OpenReminders,
@@ -48,7 +47,6 @@ impl Shell {
         let menu = Menu::new();
         let items = [
             (MenuItem::new("打开 Starter", true, None), Event::Toggle),
-            (MenuItem::new("打开终端", true, None), Event::Terminal),
             (MenuItem::new("快速提醒…", true, None), Event::OpenReminders),
             (
                 MenuItem::new("系统命令与设置…", true, None),
@@ -64,7 +62,7 @@ impl Shell {
             (MenuItem::new("退出 Starter", true, None), Event::Quit),
         ];
         for (i, (item, _)) in items.iter().enumerate() {
-            if i == 7 {
+            if i == 6 {
                 menu.append(&PredefinedMenuItem::separator())?;
             }
             menu.append(item)?;
@@ -115,7 +113,6 @@ impl Shell {
             .find(|(key, _)| key.id() == id)
             .map(|(_, action)| match action {
                 Action::Toggle => Event::Toggle,
-                Action::Terminal => Event::Terminal,
                 Action::Applications(apps) => Event::Applications(apps.clone()),
             })
     }
@@ -163,10 +160,6 @@ fn tray_icon() -> Result<Icon> {
 
 pub fn open_target(path: &Path) -> Result<()> {
     opening::open(path, None)
-}
-
-pub fn open_terminal(config: &Config) -> Result<()> {
-    opening::launch(&config.terminal)
 }
 
 pub fn reveal(path: &Path) -> Result<()> {

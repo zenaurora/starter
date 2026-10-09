@@ -43,20 +43,12 @@ enum Tab {
     Clipboard,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BuiltinHotkey {
-    Launcher,
-    Terminal,
-}
-
 pub struct Settings {
     draft: Config,
     tab: Tab,
     focus: FocusHandle,
     content_scroll: ScrollHandle,
     launcher: Entity<HotkeyEditor>,
-    terminal_key: Entity<HotkeyEditor>,
-    terminal: Entity<InputState>,
     font: Entity<InputState>,
     roots: Entity<TextareaState>,
     alias_app: Entity<InputState>,
@@ -69,7 +61,7 @@ pub struct Settings {
     picker: Option<Entity<InputState>>,
     app_search: Entity<InputState>,
     editing_shortcut: Option<usize>,
-    editing_builtin: Option<BuiltinHotkey>,
+    launcher_editor_open: bool,
     shortcut_editor_open: bool,
     _subscriptions: Vec<Subscription>,
     pub error: Option<String>,
@@ -103,11 +95,6 @@ impl Settings {
         let launcher = cx.new(|cx| {
             HotkeyEditor::new("呼出快捷键", &config.launcher_hotkey, window, cx).without_label()
         });
-        let terminal_key = cx.new(|cx| {
-            HotkeyEditor::new("终端直达快捷键", &config.terminal_hotkey, window, cx).without_label()
-        });
-        let terminal =
-            cx.new(|cx| InputState::new(window, cx).default_value(config.terminal.clone()));
         let font =
             cx.new(|cx| InputState::new(window, cx).default_value(config.monospace_font.clone()));
         let roots = cx.new(|cx| {
@@ -144,8 +131,6 @@ impl Settings {
             focus,
             content_scroll: ScrollHandle::new(),
             launcher,
-            terminal_key,
-            terminal,
             font,
             roots,
             alias_app,
@@ -158,7 +143,7 @@ impl Settings {
             picker: None,
             app_search,
             editing_shortcut: None,
-            editing_builtin: None,
+            launcher_editor_open: false,
             shortcut_editor_open: false,
             _subscriptions: vec![subscription],
             error: None,
@@ -184,9 +169,6 @@ impl Settings {
     fn values(&self, cx: &App) -> anyhow::Result<Config> {
         let mut config = self.draft.clone();
         config.launcher_hotkey = self.launcher.read(cx).value(cx)?;
-        config.terminal_hotkey = self.terminal_key.read(cx).value(cx)?;
-        config.terminal = self.terminal.read(cx).value().trim().to_string();
-        anyhow::ensure!(!config.terminal.is_empty(), "请填写终端应用");
         if let Some(shortcut) = self.pending_shortcut(cx)? {
             if let Some(i) = self.editing_shortcut {
                 config.shortcuts[i] = shortcut;
@@ -283,7 +265,6 @@ impl Settings {
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let composing = [
-            &self.terminal,
             &self.font,
             &self.alias_app,
             &self.alias_names,
@@ -387,7 +368,7 @@ impl Settings {
         self.set_shortcut_apps(&shortcut.applications, window, cx);
         self.editing_shortcut = Some(index);
         self.shortcut_editor_open = true;
-        self.editing_builtin = None;
+        self.launcher_editor_open = false;
         self.content_scroll.set_offset(Point::default());
         self.error = None;
         window.focus(&self.focus, cx);
@@ -397,7 +378,7 @@ impl Settings {
     fn new_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_shortcut(window, cx);
         self.shortcut_editor_open = true;
-        self.editing_builtin = None;
+        self.launcher_editor_open = false;
         cx.notify();
     }
 
@@ -429,14 +410,8 @@ impl Settings {
             }
         };
         let mut config = self.draft.clone();
-        let keys = self.launcher.read(cx).value(cx).and_then(|launcher| {
-            self.terminal_key
-                .read(cx)
-                .value(cx)
-                .map(|terminal| (launcher, terminal))
-        });
-        let (launcher, terminal) = match keys {
-            Ok(keys) => keys,
+        let launcher = match self.launcher.read(cx).value(cx) {
+            Ok(launcher) => launcher,
             Err(error) => {
                 self.error = Some(format!("{error:#}"));
                 cx.notify();
@@ -444,7 +419,6 @@ impl Settings {
             }
         };
         config.launcher_hotkey = launcher;
-        config.terminal_hotkey = terminal;
         if let Some(i) = self.editing_shortcut {
             config.shortcuts[i] = shortcut;
         } else {
@@ -729,24 +703,9 @@ impl Settings {
             .into_any_element()
     }
 
-    fn builtin_hotkey_row(&self, kind: BuiltinHotkey, cx: &Context<Self>) -> AnyElement {
+    fn launcher_hotkey_row(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (title, description, editor, id) = match kind {
-            BuiltinHotkey::Launcher => (
-                "呼出 Starter",
-                "打开或收起搜索窗口".to_string(),
-                &self.launcher,
-                "edit-launcher-hotkey",
-            ),
-            BuiltinHotkey::Terminal => (
-                "打开终端",
-                self.app_name(&self.terminal.read(cx).value()),
-                &self.terminal_key,
-                "edit-terminal-hotkey",
-            ),
-        };
-        let expanded = self.editing_builtin == Some(kind);
-        let value = editor.read(cx).value(cx);
+        let value = self.launcher.read(cx).value(cx);
         div()
             .flex()
             .flex_col()
@@ -767,56 +726,43 @@ impl Settings {
                                 div()
                                     .text_size(px(13.))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child(title),
+                                    .child("呼出 Starter"),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
                                     .text_color(theme.muted_foreground)
-                                    .text_ellipsis()
-                                    .child(description),
+                                    .child("打开或收起搜索窗口"),
                             ),
                     )
-                    .when(!expanded, |row| {
+                    .when(!self.launcher_editor_open, |row| {
                         row.child(Self::hotkey_badges(
                             value.as_deref().unwrap_or("待完善"),
                             cx,
                         ))
                     })
                     .child(
-                        Button::new(id)
-                            .label(if expanded { "收起" } else { "修改" })
+                        Button::new("edit-launcher-hotkey")
+                            .label(if self.launcher_editor_open {
+                                "收起"
+                            } else {
+                                "修改"
+                            })
                             .ghost()
                             .small()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.editing_builtin = if this.editing_builtin == Some(kind) {
-                                    None
-                                } else {
-                                    Some(kind)
-                                };
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.launcher_editor_open = !this.launcher_editor_open;
                                 cx.notify();
                             })),
                     ),
             )
-            .when(expanded, |body| {
+            .when(self.launcher_editor_open, |body| {
                 body.child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
                         .pt_3()
                         .border_t_1()
                         .border_color(theme.border)
-                        .child(editor.clone())
-                        .when(kind == BuiltinHotkey::Terminal, |body| {
-                            body.child(self.app_field("终端应用", &self.terminal, cx))
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(theme.muted_foreground)
-                                        .child("清空组合键可停用终端快捷键。"),
-                                )
-                        }),
+                        .child(self.launcher.clone()),
                 )
             })
             .into_any_element()
@@ -932,14 +878,7 @@ impl Settings {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .child(self.builtin_hotkey_row(BuiltinHotkey::Launcher, cx))
-                            .child(
-                                div()
-                                    .border_t_1()
-                                    .border_color(theme.border)
-                                    .pt_3()
-                                    .child(self.builtin_hotkey_row(BuiltinHotkey::Terminal, cx)),
-                            ),
+                            .child(self.launcher_hotkey_row(cx)),
                     ),
             )
             .child(
@@ -1476,20 +1415,15 @@ mod tests {
         let (handle, settings) = fixture(cx);
         cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
-            window.click("edit-terminal-hotkey", cx);
-            assert_eq!(
-                settings.read(cx).editing_builtin,
-                Some(BuiltinHotkey::Terminal)
-            );
             window.click("edit-launcher-hotkey", cx);
-            assert_eq!(
-                settings.read(cx).editing_builtin,
-                Some(BuiltinHotkey::Launcher)
-            );
+            assert!(settings.read(cx).launcher_editor_open);
+            window.click("edit-launcher-hotkey", cx);
+            assert!(!settings.read(cx).launcher_editor_open);
+            window.click("edit-launcher-hotkey", cx);
             window.click("new-shortcut", cx);
             settings.update(cx, |this, cx| {
                 assert!(this.shortcut_editor_open);
-                assert!(this.editing_builtin.is_none());
+                assert!(!this.launcher_editor_open);
                 this.shortcut_key
                     .update(cx, |input, cx| input.set_value("Cmd+Enter", window, cx));
                 this.set_shortcut_apps(&["kitty".into(), "ChatGPT".into()], window, cx);

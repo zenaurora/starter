@@ -793,13 +793,6 @@ impl Launcher {
                     self.show(window, cx);
                 }
             }
-            ShellEvent::Terminal => match platform::open_terminal(&self.config) {
-                Ok(()) => self.hide(window, cx),
-                Err(problem) => {
-                    self.status = format!("终端打开失败：{problem:#}");
-                    self.show(window, cx);
-                }
-            },
             ShellEvent::Applications(applications) => {
                 self.hide(window, cx);
                 let job = cx

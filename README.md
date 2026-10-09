@@ -59,7 +59,7 @@ Click mode buttons to browse by category. `↑↓` to select, `Enter` to open, `
 
 Open settings with the gear icon, `⌘,` / `Ctrl+,`, or via the tray menu.
 
-- **Hotkeys** — customize launcher, terminal, and app shortcuts with a visual key picker; one shortcut can open multiple apps together (for example, `Cmd+Enter` opens kitty and ChatGPT)
+- **Hotkeys** — customize the launcher shortcut and create your own app shortcuts with a visual key picker; one shortcut can open multiple apps together (for example, `Cmd+Enter` opens kitty and ChatGPT)
 - **File associations** — set which app opens which file extension from search results
 - **Appearance** — pick a theme (Catppuccin Mocha, Everforest, Gruvbox, Latte) and monospace font
 - **Search directories** — add folders to index for file search
@@ -69,7 +69,7 @@ Open settings with the gear icon, `⌘,` / `Ctrl+,`, or via the tray menu.
 
 Changes apply immediately. No restart needed.
 
-The hotkey page separates Starter's built-in shortcuts from your app shortcut groups. Click **修改** to expand a built-in shortcut, or **新建** / **编辑** to open an app group editor. Use **添加应用** to add targets, then save settings. **取消编辑** discards just the current group edit. Existing single-app shortcuts continue to work. If one target fails to launch, the other apps still open and Starter reports the failed targets.
+The hotkey page separates Starter's launcher shortcut from your app shortcut groups. Click **修改** to change the launcher shortcut, or **新建** / **编辑** to open an app group editor. Terminals such as kitty are configured as ordinary apps; Starter reserves no terminal shortcut. Use **添加应用** to add targets, then save settings. **取消编辑** discards just the current group edit. Existing single-app shortcuts continue to work. If one target fails to launch, the other apps still open and Starter reports the failed targets.
 
 You can also configure a group in `config.toml`:
 

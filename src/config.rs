@@ -12,9 +12,6 @@ pub struct Config {
     pub theme: ThemeName,
     pub monospace_font: String,
     pub launcher_hotkey: String,
-    pub terminal_hotkey: String,
-    /// macOS: application name; Windows: executable path/name. Never a shell string.
-    pub terminal: String,
     pub auto_check_updates: bool,
     pub clipboard_history: bool,
     pub shortcuts: Vec<AppShortcut>,
@@ -39,13 +36,6 @@ impl Default for Config {
                 "Alt+Space"
             } else {
                 "Ctrl+Space"
-            }
-            .into(),
-            terminal_hotkey: "Alt+Enter".into(),
-            terminal: if cfg!(target_os = "macos") {
-                "Terminal"
-            } else {
-                "wt.exe"
             }
             .into(),
             auto_check_updates: true,
@@ -131,7 +121,6 @@ pub fn load_or_create() -> Result<(Config, PathBuf)> {
     if !path.exists() {
         let config = Config::default();
         let header = "# Starter configuration. Save, then choose Reload configuration in the tray.\n\
-            # macOS terminal: app name (e.g. Ghostty). Windows terminal: executable path.\n\
             # search_roots = [\"~/Documents\", \"~/code\"]\n\
             # [aliases]\n\
             # \"Visual Studio Code\" = [\"code\", \"vsc\"]\n\n";
@@ -148,7 +137,13 @@ pub fn load_or_create() -> Result<(Config, PathBuf)> {
 pub fn read(path: &Path) -> Result<Config> {
     let text =
         fs::read_to_string(path).with_context(|| format!("Cannot read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("Invalid configuration in {}", path.display()))
+    let config = toml::from_str::<toml::Table>(&text).and_then(|mut table| {
+        // Old terminal settings are retired; terminals use user-created app shortcuts.
+        table.remove("terminal");
+        table.remove("terminal_hotkey");
+        table.try_into()
+    });
+    config.with_context(|| format!("Invalid configuration in {}", path.display()))
 }
 
 pub fn expand_home(path: &Path) -> PathBuf {
@@ -234,13 +229,21 @@ mod tests {
         config.theme = ThemeName::Gruvbox;
         save(&path, &config).unwrap();
         assert_eq!(read(&path).unwrap().theme, ThemeName::Gruvbox);
-        let old: Config = toml::from_str("terminal = 'kitty'").unwrap();
+        fs::write(&path, "terminal = 'kitty'\nterminal_hotkey = 'Alt+Enter'").unwrap();
+        let old = read(&path).unwrap();
         assert_eq!(old.theme, ThemeName::Catppuccin);
-        assert_eq!(old.terminal, "kitty");
         assert!(old.auto_check_updates);
         assert!(old.clipboard_history);
         assert!(old.open_with.is_empty());
         assert!(old.shortcuts.is_empty());
+        assert_eq!(crate::hotkeys::bindings(&old).unwrap().len(), 1);
+        save(&path, &old).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("terminal"));
+        fs::write(&path, "unknown_setting = true").unwrap();
+        assert!(
+            read(&path).is_err(),
+            "other unknown fields must still be rejected"
+        );
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

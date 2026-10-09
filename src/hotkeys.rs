@@ -9,7 +9,6 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Toggle,
-    Terminal,
     Applications(Vec<String>),
 }
 
@@ -89,9 +88,6 @@ pub fn compose(parts: &[String]) -> Result<String> {
 
 pub fn bindings(config: &Config) -> Result<Vec<(HotKey, Action)>> {
     let mut bindings = vec![(parse(&config.launcher_hotkey)?, Action::Toggle)];
-    if !config.terminal_hotkey.trim().is_empty() {
-        bindings.push((parse(&config.terminal_hotkey)?, Action::Terminal));
-    }
     for shortcut in config.shortcuts.iter().filter(|shortcut| shortcut.enabled) {
         ensure!(
             !shortcut.applications.is_empty()
@@ -172,6 +168,29 @@ mod tests {
     use crate::config::AppShortcut;
 
     #[test]
+    fn only_launcher_is_builtin_and_terminals_use_regular_app_shortcuts() {
+        let mut config = Config::default();
+        assert_eq!(
+            bindings(&config).unwrap(),
+            vec![(parse(&config.launcher_hotkey).unwrap(), Action::Toggle)]
+        );
+        config.shortcuts.push(AppShortcut {
+            hotkey: "Alt+Enter".into(),
+            applications: vec!["kitty".into()],
+            enabled: true,
+        });
+        let registered = bindings(&config).unwrap();
+        assert_eq!(registered.len(), 2);
+        assert_eq!(
+            registered[1],
+            (
+                parse("Alt+Enter").unwrap(),
+                Action::Applications(vec!["kitty".into()])
+            )
+        );
+    }
+
+    #[test]
     fn one_binding_carries_all_targets_and_rejects_invalid_groups() {
         let mut config = Config::default();
         config.shortcuts.push(AppShortcut {
@@ -180,9 +199,9 @@ mod tests {
             enabled: true,
         });
         let registered = bindings(&config).unwrap();
-        assert_eq!(registered.len(), 3);
+        assert_eq!(registered.len(), 2);
         assert_eq!(
-            registered[2].1,
+            registered[1].1,
             Action::Applications(vec!["kitty".into(), "ChatGPT".into()])
         );
         for applications in [
@@ -195,7 +214,7 @@ mod tests {
             assert!(bindings(&config).is_err());
         }
         config.shortcuts[0].enabled = false;
-        assert_eq!(bindings(&config).unwrap().len(), 2);
+        assert_eq!(bindings(&config).unwrap().len(), 1);
     }
 
     #[test]
@@ -289,11 +308,11 @@ mod tests {
         });
         assert!(bindings(&config).is_err());
         config.shortcuts[0].enabled = false;
-        assert_eq!(bindings(&config).unwrap().len(), 2);
+        assert_eq!(bindings(&config).unwrap().len(), 1);
         config.shortcuts[0].enabled = true;
         config.shortcuts[0].hotkey = "Cmd+K".into();
         assert_eq!(
-            bindings(&config).unwrap()[2].1,
+            bindings(&config).unwrap()[1].1,
             Action::Applications(vec!["Editor".into()])
         );
         config.shortcuts[0].hotkey = "K".into();
