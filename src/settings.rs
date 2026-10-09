@@ -35,6 +35,7 @@ pub enum Event {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     General,
+    Startup,
     Opening,
     Appearance,
     Search,
@@ -1063,6 +1064,20 @@ impl Settings {
         let theme = cx.theme();
         let body = div().w_full().flex().flex_col().gap_5();
         match self.tab {
+            Tab::Startup => body
+                .child(div().flex().items_center().justify_between()
+                    .child("开机自启动")
+                    .child(Switch::new("launch-at-login")
+                        .checked(self.draft.launch_at_login)
+                        .on_change(cx.listener(|this, checked, _, cx| {
+                            this.draft.launch_at_login = *checked;
+                            cx.notify();
+                        }))))
+                .child(div().text_size(px(12.)).text_color(theme.muted_foreground)
+                    .child("登录系统后自动运行 Starter，驻留托盘。需要时按快捷键呼出搜索窗口。"))
+                .child(div().text_size(px(11.)).text_color(theme.muted_foreground)
+                    .child("保存设置后生效。"))
+                .into_any_element(),
             Tab::Clipboard => body
                 .child(div().flex().items_center().justify_between().child("记录剪贴板历史")
                     .child(Switch::new("clipboard-history").checked(self.draft.clipboard_history)
@@ -1189,6 +1204,7 @@ impl Render for Settings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let tabs = [
+            (Tab::Startup, IconName::Settings2, "启动"),
             (Tab::General, IconName::Keyboard, "快捷键"),
             (Tab::Opening, IconName::AppWindow, "打开方式"),
             (Tab::Appearance, IconName::Palette, "外观"),
@@ -1198,6 +1214,7 @@ impl Render for Settings {
             (Tab::Clipboard, IconName::FileText, "剪贴板"),
         ];
         let titles = match self.tab {
+            Tab::Startup => ("启动", "设置 Starter 在登录系统时的行为。"),
             Tab::Opening => ("打开方式", "为文件和文件夹指定常用应用。"),
             Tab::General if self.shortcut_editor_open => (
                 if self.editing_shortcut.is_some() {
@@ -1406,6 +1423,42 @@ mod tests {
             .unwrap()
         });
         (handle.downcast().unwrap(), settings)
+    }
+
+    #[gpui_kit::test]
+    fn login_toggle_is_a_draft_and_cancel_does_not_save(cx: &mut TestAppContext) {
+        let (handle, settings) = fixture(cx);
+        let saved = std::rc::Rc::new(std::cell::Cell::new(false));
+        let saved_event = saved.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&settings, move |_, event, _| {
+                if let Event::Save(config) = event {
+                    saved_event.set(config.launch_at_login);
+                }
+            })
+        });
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.click("启动", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("launch-at-login", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(settings.read(cx).draft.launch_at_login);
+            assert!(settings.read(cx).values(cx).unwrap().launch_at_login);
+            assert!(!saved.get());
+            window.click("cancel", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(!saved.get());
+        cx.update_window(handle.into(), |_, window, cx| window.click("save", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(saved.get());
     }
 
     #[gpui_kit::test]

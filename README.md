@@ -60,6 +60,7 @@ Click mode buttons to browse by category. `↑↓` to select, `Enter` to open, `
 Open settings with the gear icon, `⌘,` / `Ctrl+,`, or via the tray menu.
 
 - **Hotkeys** — customize the launcher shortcut and create your own app shortcuts with a visual key picker; one shortcut can open multiple apps together (for example, `Cmd+Enter` opens kitty and ChatGPT)
+- **Startup** — optionally launch at login and stay in the tray until you summon Starter; disabled by default and applied when you save settings
 - **File associations** — set which app opens which file extension from search results
 - **Appearance** — pick a theme (Catppuccin Mocha, Everforest, Gruvbox, Latte) and monospace font
 - **Search directories** — add folders to index for file search

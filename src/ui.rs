@@ -815,9 +815,7 @@ impl Launcher {
             }
             ShellEvent::Reload => {
                 let result = config::read(&self.config_path).and_then(|config| {
-                    if let Some(shell) = &mut self.shell {
-                        shell.rebind(&config)?;
-                    }
+                    self.apply_config(&config, false)?;
                     Ok(config)
                 });
                 match result {
@@ -1219,20 +1217,7 @@ impl Launcher {
     }
 
     fn save_settings(&mut self, config: Config, window: &mut Window, cx: &mut Context<Self>) {
-        let result = (|| -> anyhow::Result<()> {
-            if let Some(shell) = &mut self.shell {
-                shell.rebind(&config)?;
-            }
-            if let Err(error) = config::save(&self.config_path, &config) {
-                if let Some(shell) = &mut self.shell {
-                    shell.rebind(&self.config).map_err(|rollback| {
-                        anyhow::anyhow!("{error:#}；快捷键恢复失败：{rollback:#}")
-                    })?;
-                }
-                return Err(error);
-            }
-            Ok(())
-        })();
+        let result = self.apply_config(&config, true);
         match result {
             Ok(()) => {
                 let enable_updates = config.auto_check_updates && !self.config.auto_check_updates;
@@ -1256,6 +1241,37 @@ impl Launcher {
                     });
                 }
             }
+        }
+    }
+
+    fn apply_config(&mut self, config: &Config, persist: bool) -> anyhow::Result<()> {
+        if let Some(shell) = &mut self.shell {
+            shell.rebind(config)?;
+        }
+        let result =
+            starter::startup::apply(config.launch_at_login, self.config.launch_at_login, || {
+                if persist {
+                    config::save(&self.config_path, config)
+                } else {
+                    Ok(())
+                }
+            });
+        if let Err(error) = result {
+            if let Some(shell) = &mut self.shell {
+                shell.rebind(&self.config).map_err(|rollback| {
+                    anyhow::anyhow!("{error:#}；快捷键恢复失败：{rollback:#}")
+                })?;
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn start_background(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.error_dialog.is_none() {
+            self.hide(window, cx);
+        } else {
+            platform::show(window, cx);
         }
     }
 

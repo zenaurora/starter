@@ -12,6 +12,7 @@ pub struct Config {
     pub theme: ThemeName,
     pub monospace_font: String,
     pub launcher_hotkey: String,
+    pub launch_at_login: bool,
     pub auto_check_updates: bool,
     pub clipboard_history: bool,
     pub shortcuts: Vec<AppShortcut>,
@@ -38,6 +39,7 @@ impl Default for Config {
                 "Ctrl+Space"
             }
             .into(),
+            launch_at_login: false,
             auto_check_updates: true,
             clipboard_history: true,
             shortcuts: Vec::new(),
@@ -199,6 +201,7 @@ mod tests {
             .join("config.toml");
         let mut config = Config {
             theme: ThemeName::Everforest,
+            launch_at_login: true,
             auto_check_updates: false,
             clipboard_history: false,
             search_roots: vec![PathBuf::from("~/code")],
@@ -221,6 +224,7 @@ mod tests {
         assert_eq!(saved.open_with, config.open_with);
         assert_eq!(saved.shortcuts, config.shortcuts);
         assert_eq!(saved.theme, ThemeName::Everforest);
+        assert!(saved.launch_at_login);
         assert!(!saved.auto_check_updates);
         assert!(!saved.clipboard_history);
         assert_eq!(saved.search_roots, config.search_roots);
@@ -232,6 +236,7 @@ mod tests {
         fs::write(&path, "terminal = 'kitty'\nterminal_hotkey = 'Alt+Enter'").unwrap();
         let old = read(&path).unwrap();
         assert_eq!(old.theme, ThemeName::Catppuccin);
+        assert!(!old.launch_at_login);
         assert!(old.auto_check_updates);
         assert!(old.clipboard_history);
         assert!(old.open_with.is_empty());

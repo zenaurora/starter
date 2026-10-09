@@ -33,6 +33,7 @@ tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+plist = "1"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSDictionary", "NSString", "NSPropertyList", "NSError", "NSArray", "NSURL", "NSFileManager", "NSAppleEventDescriptor", "NSDate", "NSBundle", "objc2-core-services"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger", "UNNotificationSettings"] }

@@ -6,6 +6,7 @@ pub mod hotkeys;
 pub mod opening;
 pub mod reminders;
 pub mod search;
+pub mod startup;
 pub mod system_commands;
 pub mod uninstall;
 pub mod updates;
