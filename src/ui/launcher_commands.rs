@@ -67,7 +67,11 @@ impl Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.reminder_panel.is_some() || self.power_busy || self.uninstall_busy {
+        if self.has_uninstall_task()
+            || self.reminder_panel.is_some()
+            || self.power_busy
+            || self.uninstall_busy
+        {
             return;
         }
         let panel = cx.new(|cx| {

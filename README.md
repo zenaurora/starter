@@ -46,7 +46,7 @@ Type to search apps, or use these shortcuts:
 | `微信` | Finds WeChat by Chinese name |
 | `/f ui` | Searches file/folder names in your configured directories |
 | `/c launcher_hotkey` | Searches file contents (case-insensitive) |
-| `/uninstall 微信` | Uninstalls WeChat after confirmation |
+| `/uninstall 微信` | Offers Mole cleanup or native uninstall after selecting WeChat |
 | `/clip needle` | Searches clipboard history by keyword |
 | `/clip 图片 2026-10` | Filters clipboard images by type and date |
 | `Lock` / `Sleep` | Locks screen or sleeps the computer immediately |
@@ -56,6 +56,10 @@ Type to search apps, or use these shortcuts:
 | `/remind tomorrow 15:00 call` | Creates reminder tomorrow at 3 PM |
 
 Click mode buttons to browse by category. `↑↓` to select, `Enter` to open, `⌘/Ctrl+Enter` to reveal in Finder/Explorer, `Shift+Enter` to copy path. Star apps to favorite them — they float to the top.
+
+On macOS, uninstall offers **卸载并清理关联文件** using an independently installed [Mole](https://github.com/tw93/Mole) (`brew install mole`), or **仅移到废纸篓** to keep app settings and data. Mole's file preview, confirmations, progress, and any TTY password prompt appear inside Starter's own window, using its theme and monospace font. No external terminal opens. Follow Mole's prompts with the keyboard; Starter never confirms removal automatically. **收起任务** or `⌘W` keeps the task running; summon Starter again to restore it. **停止任务** interrupts it; completed removals are not undone. Output remains available until you return, and the application list refreshes when the process exits.
+
+The first version handles one selected app at a time and requires Mole's JSON inventory interface (verified with Mole 1.59.0). Missing Mole, unsupported inventory, or ambiguous app names produce an explanation and leave the native Trash option available. Windows continues to use the application's official uninstaller.
 
 ## Settings
 
@@ -100,6 +104,8 @@ System commands use native APIs — macOS uses system preference URLs and runtim
 Most launchers are either slow web apps, cloud-dependent services, or feature-bloated tools. Starter is none of those. It's a single native binary with GPU rendering, instant startup, and zero network dependencies. Built for daily use without friction.
 
 ## Development
+
+[Embedded uninstall terminal tutorial (中文)](docs/从零读懂Starter内嵌卸载终端.md) walks through the Mole adapter, PTY session, native rendering, keyboard input, and task lifecycle, with two runnable exercises.
 
 ```sh
 # Format, lint, test

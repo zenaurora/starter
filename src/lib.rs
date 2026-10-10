@@ -8,6 +8,8 @@ pub mod reminders;
 pub mod search;
 pub mod startup;
 pub mod system_commands;
+#[cfg(target_os = "macos")]
+pub mod task_terminal;
 pub mod uninstall;
 pub mod updates;
 pub mod version;

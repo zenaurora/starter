@@ -1,8 +1,12 @@
 mod error_dialog;
 mod launcher_commands;
 mod reminder_panel;
+#[cfg(target_os = "macos")]
+mod task_terminal;
 #[cfg(test)]
 mod tests;
+#[cfg(target_os = "macos")]
+mod uninstall_task;
 
 use crate::{
     appearance,
@@ -59,6 +63,10 @@ pub struct Launcher {
     uninstall_targets: Vec<uninstall::Target>,
     uninstall_confirmation: Option<uninstall::Target>,
     uninstall_busy: bool,
+    #[cfg(target_os = "macos")]
+    uninstall_task: Option<Entity<uninstall_task::TaskPanel>>,
+    #[cfg(target_os = "macos")]
+    uninstall_task_subscription: Option<Subscription>,
     power_confirmation: Option<Power>,
     power_busy: bool,
     reminder_entries: Vec<reminders::Entry>,
@@ -299,6 +307,10 @@ impl Launcher {
             uninstall_targets: Vec::new(),
             uninstall_confirmation: None,
             uninstall_busy: false,
+            #[cfg(target_os = "macos")]
+            uninstall_task: None,
+            #[cfg(target_os = "macos")]
+            uninstall_task_subscription: None,
             power_confirmation: None,
             power_busy: false,
             reminder_entries: Vec::new(),
@@ -356,6 +368,13 @@ impl Launcher {
 
     fn observe_activation(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         cx.observe_window_activation(window, |this, window, cx| {
+            #[cfg(target_os = "macos")]
+            if let Some(task) = &this.uninstall_task {
+                if window.is_window_active() && this.visible {
+                    task.update(cx, |task, cx| task.focus(window, cx));
+                }
+                return;
+            }
             if window.is_window_active()
                 && this.visible
                 && this.settings.is_none()
@@ -680,6 +699,57 @@ impl Launcher {
         }
     }
 
+    fn has_uninstall_task(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.uninstall_task.is_some()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn close_uninstall_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.uninstall_task = None;
+        self.uninstall_task_subscription = None;
+        self.input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_mole_uninstall(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.uninstall_busy || self.has_uninstall_task() {
+            return;
+        }
+        let Some(target) = self.uninstall_confirmation.take() else {
+            return;
+        };
+        let native_target = target.clone();
+        let panel =
+            cx.new(|cx| uninstall_task::TaskPanel::new(target, self.config.theme, window, cx));
+        self.uninstall_task_subscription = Some(cx.subscribe_in(
+            &panel,
+            window,
+            move |this, _, event, window, cx| match event {
+                uninstall_task::Event::Hide => this.hide(window, cx),
+                uninstall_task::Event::Close => this.close_uninstall_task(window, cx),
+                uninstall_task::Event::Finished => {
+                    this.refresh_apps();
+                    this.search(cx);
+                }
+                uninstall_task::Event::Trash => {
+                    this.close_uninstall_task(window, cx);
+                    this.uninstall_confirmation = Some(native_target.clone());
+                    this.confirm_uninstall(window, cx);
+                }
+            },
+        ));
+        self.uninstall_task = Some(panel);
+        cx.notify();
+    }
+
     fn confirm_uninstall(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.uninstall_busy {
             return;
@@ -747,7 +817,9 @@ impl Launcher {
                         div()
                             .text_size(px(13.))
                             .line_height(relative(1.6))
-                            .child(target.description()),
+                            .child(if cfg!(target_os = "macos") {
+                                "使用 Mole 查看并清理关联文件，确认和执行过程会显示在 Starter 内。仅移到废纸篓会保留配置和个人数据。".to_string()
+                            } else { target.description() }),
                     )
                     .when(self.uninstall_busy, |body| body.child("正在处理…"))
                     .when(!self.uninstall_busy, |body| {
@@ -773,11 +845,18 @@ impl Launcher {
                                         } else {
                                             "确认启动卸载"
                                         })
-                                        .primary()
+                                        .when(!cfg!(target_os = "macos"), |button| button.primary())
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.confirm_uninstall(window, cx)
                                         })),
-                                ),
+                                )
+                                .map(|buttons| {
+                                    #[cfg(target_os = "macos")]
+                                    { buttons.child(Button::new("mole-uninstall").label("卸载并清理关联文件").primary()
+                                        .on_click(cx.listener(|this, _, window, cx| this.start_mole_uninstall(window, cx)))) }
+                                    #[cfg(not(target_os = "macos"))]
+                                    { buttons }
+                                }),
                         )
                     }),
             )
@@ -822,6 +901,10 @@ impl Launcher {
                     Ok(config) => {
                         appearance::apply(config.theme, &config, window, cx);
                         self.config = config;
+                        #[cfg(target_os = "macos")]
+                        if let Some(task) = &self.uninstall_task {
+                            task.update(cx, |task, cx| task.set_theme(self.config.theme, cx));
+                        }
                         let _ = self
                             .clipboard_worker
                             .try_send(clipboard::Command::Enabled(self.config.clipboard_history));
@@ -844,9 +927,11 @@ impl Launcher {
             }
             ShellEvent::OpenSystem => {
                 self.show(window, cx);
-                self.input
-                    .update(cx, |input, cx| input.set_value("/system ", window, cx));
-                self.search(cx);
+                if !self.has_uninstall_task() {
+                    self.input
+                        .update(cx, |input, cx| input.set_value("/system ", window, cx));
+                    self.search(cx);
+                }
             }
             ShellEvent::Refresh => self.refresh_all(cx),
             ShellEvent::Quit => cx.quit(),
@@ -855,6 +940,21 @@ impl Launcher {
     }
 
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if let Some(task) = &self.uninstall_task {
+            self.visible = true;
+            platform::show(window, cx);
+            task.update(cx, |task, cx| task.focus(window, cx));
+            cx.defer_in(window, |this, window, cx| {
+                if this.visible
+                    && let Some(task) = &this.uninstall_task
+                {
+                    task.update(cx, |task, cx| task.focus(window, cx));
+                }
+            });
+            cx.notify();
+            return;
+        }
         if self.uninstall_busy || self.power_busy {
             self.visible = true;
             platform::show(window, cx);
@@ -885,6 +985,7 @@ impl Launcher {
                 && this.power_confirmation.is_none()
                 && !this.power_busy
                 && this.reminder_panel.is_none()
+                && !this.has_uninstall_task()
             {
                 this.input.update(cx, |input, cx| input.focus(window, cx));
                 cx.notify();
@@ -905,7 +1006,8 @@ impl Launcher {
     }
 
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.uninstall_confirmation.is_some()
+        if self.has_uninstall_task()
+            || self.uninstall_confirmation.is_some()
             || self.uninstall_busy
             || self.power_confirmation.is_some()
             || self.power_busy
@@ -992,7 +1094,8 @@ impl Launcher {
     }
 
     fn reveal_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.uninstall_confirmation.is_some()
+        if self.has_uninstall_task()
+            || self.uninstall_confirmation.is_some()
             || self.power_confirmation.is_some()
             || self.power_busy
             || self.reminder_panel.is_some()
@@ -1018,7 +1121,8 @@ impl Launcher {
     }
 
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
-        if self.uninstall_confirmation.is_some()
+        if self.has_uninstall_task()
+            || self.uninstall_confirmation.is_some()
             || self.power_confirmation.is_some()
             || self.power_busy
             || self.reminder_panel.is_some()
@@ -1069,6 +1173,14 @@ impl Launcher {
                 window.remove_window();
             }
             cx.stop_propagation();
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(task) = &self.uninstall_task {
+            if event.keystroke.key == "escape" && task.read(cx).can_close() {
+                self.close_uninstall_task(window, cx);
+                cx.stop_propagation();
+            }
             return;
         }
         if self.settings.is_some() || self.reminder_panel.is_some() {
@@ -1157,6 +1269,10 @@ impl Launcher {
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_uninstall_task() {
+            self.show(window, cx);
+            return;
+        }
         self.visible = true;
         platform::show(window, cx);
         if self.settings.is_some() {
@@ -1599,6 +1715,14 @@ impl Drop for Launcher {
 
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        if let Some(task) = &self.uninstall_task {
+            return div()
+                .size_full()
+                .capture_key_down(cx.listener(Self::key_down))
+                .child(task.clone())
+                .into_any_element();
+        }
         if self.power_confirmation.is_some() {
             return self.power_dialog(cx);
         }

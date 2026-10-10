@@ -59,6 +59,10 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         uninstall_targets: vec![],
                         uninstall_confirmation: None,
                         uninstall_busy: false,
+                        #[cfg(target_os = "macos")]
+                        uninstall_task: None,
+                        #[cfg(target_os = "macos")]
+                        uninstall_task_subscription: None,
                         power_confirmation: None,
                         power_busy: false,
                         reminder_entries: vec![],
@@ -94,6 +98,101 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
         .unwrap()
     });
     (window.downcast().unwrap(), launcher)
+}
+
+#[cfg(target_os = "macos")]
+#[gpui_kit::test]
+fn uninstall_task_preserves_focus_keys_output_and_reopen_state(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    let (panel, events) = cx
+        .update_window(handle.into(), |_, window, cx| {
+            let mut events = None;
+            let panel = cx.new(|cx| {
+                let (panel, sender) =
+                    uninstall_task::TaskPanel::fixture(config::ThemeName::Catppuccin, window, cx);
+                events = Some(sender);
+                panel
+            });
+            launcher.update(cx, |this, cx| {
+                this.input.update(cx, |input, cx| {
+                    input.set_value("/uninstall Fixture", window, cx)
+                });
+                this.uninstall_task = Some(panel.clone());
+                cx.notify();
+            });
+            (panel, events.unwrap())
+        })
+        .unwrap();
+    let terminal = panel.read_with(cx, |panel, _| panel.terminal());
+    let visual = VisualTestContext::from_window(handle.into(), cx).into_mut();
+    events
+        .try_send(starter::task_terminal::Event::Output(
+            b"preview files\r\nEnter confirm, ESC cancel".to_vec(),
+        ))
+        .unwrap();
+    visual.run_until_parked();
+    visual
+        .update_window(handle.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(terminal.focus_handle(cx).is_focused(window));
+            assert!(!launcher.read(cx).input.focus_handle(cx).is_focused(window));
+            for key in ["down", "up", "escape", "enter", "ctrl-c"] {
+                window.press(key, cx);
+            }
+            assert_eq!(launcher.read(cx).selected, 0);
+            assert!(launcher.read(cx).uninstall_task.is_some());
+            assert_eq!(
+                launcher.read(cx).input.read(cx).value(),
+                "/uninstall Fixture"
+            );
+        })
+        .unwrap();
+    visual.run_until_parked();
+    let bounds = visual.debug_bounds("task-terminal").unwrap();
+    assert!(
+        bounds.size.height >= px(260.),
+        "terminal needs readable space: {bounds:?}"
+    );
+    assert!(bounds.right() <= px(720.) && bounds.bottom() < px(560.));
+    visual.deactivate_window();
+    visual
+        .update_window(handle.into(), |_, window, cx| {
+            launcher.update(cx, |this, cx| {
+                this.visible = false;
+                window.blur(cx);
+                this.show(window, cx);
+                assert_eq!(
+                    this.uninstall_task.as_ref().unwrap().entity_id(),
+                    panel.entity_id()
+                );
+                assert_eq!(this.input.read(cx).value(), "/uninstall Fixture");
+            });
+        })
+        .unwrap();
+    visual.run_until_parked();
+    visual
+        .update_window(handle.into(), |_, window, cx| {
+            assert!(terminal.focus_handle(cx).is_focused(window));
+            launcher.update(cx, |this, cx| this.open_settings(window, cx));
+            assert!(launcher.read(cx).settings.is_none());
+        })
+        .unwrap();
+    assert!(visual.debug_bounds("stop-uninstall-task").unwrap().bottom() <= px(560.));
+    events
+        .try_send(starter::task_terminal::Event::Exit {
+            code: 0,
+            stopped: false,
+        })
+        .unwrap();
+    visual.run_until_parked();
+    visual
+        .update_window(handle.into(), |_, window, cx| {
+            assert!(panel.read(cx).can_close());
+            window.press("escape", cx);
+            assert!(launcher.read(cx).uninstall_task.is_none());
+            assert!(launcher.read(cx).input.focus_handle(cx).is_focused(window));
+        })
+        .unwrap();
 }
 
 #[gpui_kit::test]

@@ -98,13 +98,18 @@ pub fn description(target: &Target) -> String {
 }
 
 pub fn execute(target: &Target) -> Result<String> {
+    revalidate(target)?;
+    trash_bundle(&target.action.path, &target.name)?;
+    Ok(format!("{} 已移到废纸篓", target.name))
+}
+
+pub(super) fn revalidate(target: &Target) -> Result<()> {
     let current = std::env::current_exe()?.canonicalize()?;
     ensure!(
         validate(&target.path, &current, &roots())? == target.action,
         "应用路径已变化，请刷新列表后重试"
     );
-    trash_bundle(&target.action.path, &target.name)?;
-    Ok(format!("{} 已移到废纸篓", target.name))
+    Ok(())
 }
 
 fn trash_bundle(path: &Path, name: &str) -> Result<PathBuf> {

@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub mod mole;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "macos")]
