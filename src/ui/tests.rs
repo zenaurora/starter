@@ -85,6 +85,7 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         scroll: UniformListScrollHandle::new(),
                         status: String::new(),
                         visible: true,
+                        activation_generation: 0,
                         searching: false,
                         update_status: UpdateStatus::Idle,
                         update_release: None,
@@ -231,6 +232,25 @@ fn activation_restores_search_focus_and_arrow_navigation(cx: &mut TestAppContext
             assert_eq!(launcher.read(cx).selected, 0)
         })
         .unwrap();
+}
+
+#[gpui_kit::test]
+fn activation_transition_does_not_dismiss_visible_overlay(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    // A full-screen Space transition can briefly make the panel inactive. The
+    // activation observer must not classify that transient state as immediate
+    // dismissal. The delayed task will re-check the native state after a grace
+    // period and can still dismiss a real outside click.
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.handle_activation_change(false, true, window, cx)
+        });
+        launcher.update(cx, |this, cx| {
+            this.handle_activation_change(true, true, window, cx)
+        });
+        assert!(launcher.read(cx).visible);
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

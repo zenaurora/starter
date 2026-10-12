@@ -41,7 +41,10 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
+
+const ACTIVATION_LOSS_GRACE: Duration = Duration::from_millis(150);
 
 pub struct Launcher {
     input: Entity<InputState>,
@@ -90,6 +93,7 @@ pub struct Launcher {
     scroll: UniformListScrollHandle,
     status: String,
     visible: bool,
+    activation_generation: u64,
     searching: bool,
     update_status: UpdateStatus,
     update_release: Option<(String, Vec<updates::Asset>)>,
@@ -334,6 +338,7 @@ impl Launcher {
             scroll: UniformListScrollHandle::new(),
             status: "正在读取应用列表…".into(),
             visible: true,
+            activation_generation: 0,
             searching: false,
             update_status: update_report.unwrap_or_default(),
             update_release: None,
@@ -368,37 +373,65 @@ impl Launcher {
 
     fn observe_activation(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         cx.observe_window_activation(window, |this, window, cx| {
-            #[cfg(target_os = "macos")]
-            if let Some(task) = &this.uninstall_task {
-                if window.is_window_active() && this.visible {
-                    task.update(cx, |task, cx| task.focus(window, cx));
-                }
-                return;
-            }
-            if window.is_window_active()
-                && this.visible
-                && this.settings.is_none()
-                && this.error_dialog.is_none()
-                && this.uninstall_confirmation.is_none()
-                && this.power_confirmation.is_none()
-                && !this.power_busy
-                && this.reminder_panel.is_none()
-            {
-                this.input.update(cx, |input, cx| input.focus(window, cx));
-            } else if !window.is_window_active()
-                && this.visible
-                && this.shell.is_some()
-                && this.settings.is_none()
-                && this.error_dialog.is_none()
-                && this.uninstall_confirmation.is_none()
-                && this.power_confirmation.is_none()
-                && !this.power_busy
-                && this.reminder_panel.is_none()
-            {
-                this.hide(window, cx);
-            }
-            cx.notify();
+            let active = window.is_window_active();
+            let can_dismiss = this.shell.is_some();
+            this.handle_activation_change(active, can_dismiss, window, cx);
         })
+    }
+
+    fn handle_activation_change(
+        &mut self,
+        active: bool,
+        can_dismiss: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(target_os = "macos")]
+        if let Some(task) = &self.uninstall_task {
+            if active && self.visible {
+                task.update(cx, |task, cx| task.focus(window, cx));
+            }
+            return;
+        }
+        if active
+            && self.visible
+            && self.settings.is_none()
+            && self.error_dialog.is_none()
+            && self.uninstall_confirmation.is_none()
+            && self.power_confirmation.is_none()
+            && !self.power_busy
+            && self.reminder_panel.is_none()
+        {
+            self.activation_generation = self.activation_generation.wrapping_add(1);
+            self.input.update(cx, |input, cx| input.focus(window, cx));
+        } else if self.should_hide_on_activation_loss(active, can_dismiss) {
+            self.activation_generation = self.activation_generation.wrapping_add(1);
+            let generation = self.activation_generation;
+            self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(ACTIVATION_LOSS_GRACE).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if this.activation_generation == generation
+                        && this
+                            .should_hide_on_activation_loss(window.is_window_active(), can_dismiss)
+                    {
+                        this.hide(window, cx);
+                    }
+                });
+            }));
+        }
+        cx.notify();
+    }
+
+    fn should_hide_on_activation_loss(&self, active: bool, can_dismiss: bool) -> bool {
+        !active
+            && self.visible
+            && can_dismiss
+            && self.settings.is_none()
+            && self.error_dialog.is_none()
+            && self.uninstall_confirmation.is_none()
+            && self.power_confirmation.is_none()
+            && !self.power_busy
+            && self.reminder_panel.is_none()
     }
 
     fn check_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -943,6 +976,7 @@ impl Launcher {
         #[cfg(target_os = "macos")]
         if let Some(task) = &self.uninstall_task {
             self.visible = true;
+            self.activation_generation = self.activation_generation.wrapping_add(1);
             platform::show(window, cx);
             task.update(cx, |task, cx| task.focus(window, cx));
             cx.defer_in(window, |this, window, cx| {
@@ -957,6 +991,7 @@ impl Launcher {
         }
         if self.uninstall_busy || self.power_busy {
             self.visible = true;
+            self.activation_generation = self.activation_generation.wrapping_add(1);
             platform::show(window, cx);
             return;
         }
@@ -968,6 +1003,7 @@ impl Launcher {
             self.close_settings(window, cx);
         }
         self.visible = true;
+        self.activation_generation = self.activation_generation.wrapping_add(1);
         platform::show(window, cx);
         self.input.update(cx, |input, cx| {
             input.set_value("", window, cx);
@@ -1001,6 +1037,7 @@ impl Launcher {
             self.close_settings(window, cx);
         }
         self.visible = false;
+        self.activation_generation = self.activation_generation.wrapping_add(1);
         self.cancelled.store(true, Ordering::Relaxed);
         platform::hide(window, cx);
     }
@@ -1274,6 +1311,7 @@ impl Launcher {
             return;
         }
         self.visible = true;
+        self.activation_generation = self.activation_generation.wrapping_add(1);
         platform::show(window, cx);
         if self.settings.is_some() {
             return;

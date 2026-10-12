@@ -181,7 +181,7 @@ pub fn reveal(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Preserve launcher access across macOS Spaces when using an activating floating panel.
+/// Let the floating launcher join the current app's Space, including full screen.
 pub fn configure_launcher_window(window: &Window) {
     #[cfg(target_os = "macos")]
     {
@@ -197,10 +197,20 @@ pub fn configure_launcher_window(window: &Window) {
                 let view = handle.ns_view.as_ptr().cast::<AnyObject>();
                 let native_window: *mut AnyObject = msg_send![view, window];
                 if let Some(native_window) = native_window.as_ref() {
-                    // NSWindowCollectionBehaviorCanJoinAllSpaces and FullScreenAuxiliary.
-                    // GPUI sets these for PopUp windows but not Floating windows.
-                    let behavior: usize = msg_send![native_window, collectionBehavior];
-                    let _: () = msg_send![native_window, setCollectionBehavior: behavior | (1 << 0) | (1 << 8)];
+                    // Keep GPUI's Floating panel level, so system IME candidates
+                    // can appear above it. PopUp uses a much higher menu level.
+                    let mut behavior: usize = msg_send![native_window, collectionBehavior];
+                    behavior |= (1 << 0) | (1 << 8); // CanJoinAllSpaces, FullScreenAuxiliary
+                    if objc2::available!(macos = 13.0) {
+                        // Primary, Auxiliary and CanJoinAllApplications are mutually
+                        // exclusive. The latter is intended for system overlays.
+                        behavior &= !((1 << 16) | (1 << 17));
+                        behavior |= 1 << 18;
+                    }
+                    let _: () = msg_send![native_window, setCollectionBehavior: behavior];
+                    // Launcher lifecycle is handled per window, not by hiding the
+                    // entire app (which AppKit may unhide during delayed activation).
+                    let _: () = msg_send![native_window, setHidesOnDeactivate: false];
                 }
             }
         }
@@ -249,6 +259,10 @@ pub fn show(window: &mut Window, cx: &mut App) {
             }
         }
     }
+    // Floating is intentionally activating: GPUI's AppKit text-input path is
+    // what keeps macOS Pinyin candidates working. Collection behavior above
+    // keeps this activation on the current Space instead of switching to a
+    // private launcher Space.
     cx.activate(true);
     window.activate_window();
 }
