@@ -3,6 +3,7 @@ pub mod clipboard;
 pub mod config;
 pub mod history;
 pub mod hotkeys;
+pub mod monitor;
 pub mod opening;
 pub mod reminders;
 pub mod search;

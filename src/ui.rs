@@ -1,5 +1,6 @@
 mod error_dialog;
 mod launcher_commands;
+mod monitor_panel;
 mod reminder_panel;
 #[cfg(target_os = "macos")]
 mod task_terminal;
@@ -29,7 +30,7 @@ use starter::{
     clipboard,
     config::{self, Config},
     history::History,
-    opening, reminders,
+    monitor, opening, reminders,
     search::{self, Candidate, Kind, Mode, Query},
     system_commands::{self, Action as BuiltinAction, Power},
     uninstall,
@@ -80,6 +81,10 @@ pub struct Launcher {
     reminder_pending: bool,
     reminder_feedback: Option<String>,
     notification_warning: Option<String>,
+    monitor_snapshot: Option<Arc<monitor::Snapshot>>,
+    monitor_worker: Option<std::sync::mpsc::Sender<bool>>,
+    monitor_sampling: bool,
+    monitor_sort: monitor::Sort,
     dialog_focus: FocusHandle,
     catalog: Catalog,
     candidates: Vec<Candidate>,
@@ -159,6 +164,7 @@ impl Launcher {
             clipboard::start(clipboard_root.clone(), config.clipboard_history);
         let (reminder_worker, reminder_events) =
             reminders::start(config_path.with_file_name("reminders.json"));
+        let (monitor_worker, monitor_events) = monitor::start();
         let (shell_sender, shell_events) = async_channel::unbounded();
         let setup = Shell::start(&config, shell_sender);
         let mut tasks = vec![
@@ -182,6 +188,22 @@ impl Launcher {
                         })
                         .is_err()
                     {
+                        break;
+                    }
+                }
+            }),
+            cx.spawn_in(window, async move |this, cx| {
+                while let Ok(snapshot) = monitor_events.recv().await {
+                    if this
+                        .update_in(cx, |this, _, cx| {
+                            this.monitor_snapshot = Some(Arc::new(snapshot));
+                            if this.visible && this.query.mode == Mode::Monitor {
+                                cx.notify();
+                            }
+                        })
+                        .is_err()
+                    {
+                        eprintln!("Monitor worker: main window closed, stopping monitor handler");
                         break;
                     }
                 }
@@ -325,6 +347,10 @@ impl Launcher {
             reminder_pending: false,
             reminder_feedback: None,
             notification_warning: None,
+            monitor_snapshot: None,
+            monitor_worker: Some(monitor_worker),
+            monitor_sampling: false,
+            monitor_sort: monitor::Sort::default(),
             dialog_focus: cx.focus_handle(),
             catalog: Catalog::default(),
             candidates: Vec::new(),
@@ -351,7 +377,7 @@ impl Launcher {
         if this.config.auto_check_updates {
             this.check_updates(window, cx);
         }
-        this._tasks.push(cx.spawn_in(window, async move |this, cx| {
+        this.track_task(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(24 * 60 * 60))
@@ -377,6 +403,13 @@ impl Launcher {
             let can_dismiss = this.shell.is_some();
             this.handle_activation_change(active, can_dismiss, window, cx);
         })
+    }
+
+    fn track_task(&mut self, task: Task<()>) {
+        // Retain cancellation on window close, but release completed operations
+        // before tracking another. Repeated show/hide must not grow this forever.
+        self._tasks.retain(|task| !task.is_ready());
+        self._tasks.push(task);
     }
 
     fn handle_activation_change(
@@ -407,7 +440,7 @@ impl Launcher {
         } else if self.should_hide_on_activation_loss(active, can_dismiss) {
             self.activation_generation = self.activation_generation.wrapping_add(1);
             let generation = self.activation_generation;
-            self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            self.track_task(cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(ACTIVATION_LOSS_GRACE).await;
                 let _ = this.update_in(cx, |this, window, cx| {
                     if this.activation_generation == generation
@@ -440,7 +473,7 @@ impl Launcher {
         }
         self.set_update_status(UpdateStatus::Checking, cx);
         let check = cx.background_executor().spawn(async { updates::check() });
-        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+        self.track_task(cx.spawn_in(window, async move |this, cx| {
             let status = match check.await {
                 Ok(status) => status,
                 Err(error) => UpdateStatus::Failed(format!("{error:#}")),
@@ -471,7 +504,7 @@ impl Launcher {
                 let _ = sender.try_send(status);
             })
         });
-        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+        self.track_task(cx.spawn_in(window, async move |this, cx| {
             while let Ok(status) = receiver.recv().await {
                 if this
                     .update_in(cx, |this, _, cx| this.set_update_status(status, cx))
@@ -540,16 +573,20 @@ impl Launcher {
         self.cancelled = Arc::new(AtomicBool::new(false));
         self.generation += 1;
         self.query = Query::parse(&self.input.read(cx).value());
+        self.set_monitor_sampling(
+            self.visible && self.settings.is_none() && self.query.mode == Mode::Monitor,
+        );
         self.selected = 0;
         self.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
         if self.query.mode == Mode::Apps {
             self.searching = false;
-            let mut candidates = self.candidates.clone();
-            if !self.query.text.is_empty() {
-                candidates.extend(system_commands::candidates());
-            }
+            let commands = if self.query.text.is_empty() {
+                &[][..]
+            } else {
+                system_commands::candidates()
+            };
             self.results = search::rank_apps(
-                &candidates,
+                self.candidates.iter().chain(commands),
                 &self.query.text,
                 &self.history.entries,
                 &self.config.favorites,
@@ -566,7 +603,7 @@ impl Launcher {
         } else if self.query.mode == Mode::System {
             self.searching = false;
             self.results = search::rank(
-                &system_commands::candidates(),
+                system_commands::candidates(),
                 &self.query.text,
                 &Default::default(),
             );
@@ -574,6 +611,10 @@ impl Launcher {
         } else if self.query.mode == Mode::Reminders {
             self.searching = false;
             self.reminder_results();
+        } else if self.query.mode == Mode::Monitor {
+            self.searching = false;
+            self.results.clear();
+            self.status = "每秒更新 · CPU、内存、磁盘和应用排行".into();
         } else if self.query.mode == Mode::Uninstall {
             self.searching = false;
             let candidates: Vec<_> = self
@@ -796,7 +837,7 @@ impl Launcher {
         let job = cx
             .background_executor()
             .spawn(async move { target.execute() });
-        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+        self.track_task(cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.uninstall_busy = false;
@@ -910,7 +951,7 @@ impl Launcher {
                 let job = cx
                     .background_executor()
                     .spawn(async move { opening::launch_all(&applications) });
-                self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+                self.track_task(cx.spawn_in(window, async move |this, cx| {
                     if let Err(problem) = job.await {
                         let _ = this.update_in(cx, |this, window, cx| {
                             this.status = format!("应用打开失败：{problem:#}");
@@ -1037,6 +1078,7 @@ impl Launcher {
             self.close_settings(window, cx);
         }
         self.visible = false;
+        self.set_monitor_sampling(false);
         self.activation_generation = self.activation_generation.wrapping_add(1);
         self.cancelled.store(true, Ordering::Relaxed);
         platform::hide(window, cx);
@@ -1102,6 +1144,7 @@ impl Launcher {
                     }
                 },
                 BuiltinAction::Reminders => self.open_reminders("", window, cx),
+                BuiltinAction::Monitor => self.open_monitor(window, cx),
             }
             return;
         }
@@ -1311,6 +1354,7 @@ impl Launcher {
             return;
         }
         self.visible = true;
+        self.set_monitor_sampling(false);
         self.activation_generation = self.activation_generation.wrapping_add(1);
         platform::show(window, cx);
         if self.settings.is_some() {
@@ -1362,9 +1406,21 @@ impl Launcher {
         cx.notify();
     }
 
+    fn open_monitor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.visible = true;
+        self.activation_generation = self.activation_generation.wrapping_add(1);
+        platform::show(window, cx);
+        self.input.update(cx, |input, cx| {
+            input.set_value("/monitor ", window, cx);
+            input.focus(window, cx);
+        });
+        self.search(cx);
+    }
+
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
         self.settings_subscription = None;
+        self.set_monitor_sampling(self.visible && self.query.mode == Mode::Monitor);
         appearance::apply(self.config.theme, &self.config, window, cx);
         self.input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
@@ -1578,6 +1634,7 @@ impl Launcher {
             Kind::SystemCommand => IconName::Command,
             Kind::SystemSetting => IconName::Settings2,
             Kind::Reminder | Kind::ReminderDraft => IconName::Clock,
+            Kind::Monitor => IconName::Activity,
         };
         let thumbnail = self
             .clipboard_entries
@@ -1788,6 +1845,9 @@ impl Render for Launcher {
                 .child(settings.clone())
                 .into_any_element();
         }
+        if self.query.mode == Mode::Monitor {
+            return self.monitor_screen(cx);
+        }
         let list = uniform_list(
             "results",
             self.results.len(),
@@ -1829,6 +1889,7 @@ impl Render for Launcher {
             (Mode::Uninstall, IconName::AppWindow, "卸载", "/uninstall "),
             (Mode::System, IconName::Settings2, "系统", "/system "),
             (Mode::Reminders, IconName::Clock, "提醒", "/remind "),
+            (Mode::Monitor, IconName::Activity, "监控", "/monitor "),
         ];
         div()
             .size_full()

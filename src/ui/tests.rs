@@ -73,6 +73,10 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         reminder_pending: false,
                         reminder_feedback: None,
                         notification_warning: None,
+                        monitor_snapshot: None,
+                        monitor_worker: None,
+                        monitor_sampling: false,
+                        monitor_sort: monitor::Sort::default(),
                         dialog_focus: cx.focus_handle(),
                         candidates: Vec::new(),
                         results,
@@ -235,22 +239,24 @@ fn activation_restores_search_focus_and_arrow_navigation(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
-fn activation_transition_does_not_dismiss_visible_overlay(cx: &mut TestAppContext) {
+fn repeated_completed_operations_do_not_accumulate_task_handles(cx: &mut TestAppContext) {
     let (handle, launcher) = fixture(cx);
-    // A full-screen Space transition can briefly make the panel inactive. The
-    // activation observer must not classify that transient state as immediate
-    // dismissal. The delayed task will re-check the native state after a grace
-    // period and can still dismiss a real outside click.
-    cx.update_window(handle.into(), |_, window, cx| {
-        launcher.update(cx, |this, cx| {
-            this.handle_activation_change(false, true, window, cx)
+    for operation in 0..100 {
+        cx.update_window(handle.into(), |_, window, cx| {
+            launcher.update(cx, |this, cx| {
+                this.track_task(cx.spawn_in(window, async move |this, cx| {
+                    this.update_in(cx, |this, _, _| this.status = operation.to_string())
+                        .unwrap();
+                }));
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        launcher.read_with(cx, |this, _| {
+            assert_eq!(this.status, operation.to_string());
+            assert_eq!(this._tasks.len(), 1);
         });
-        launcher.update(cx, |this, cx| {
-            this.handle_activation_change(true, true, window, cx)
-        });
-        assert!(launcher.read(cx).visible);
-    })
-    .unwrap();
+    }
 }
 
 #[gpui_kit::test]
@@ -625,7 +631,16 @@ fn mode_navigation_fits_the_launcher_width(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update_window(handle.into(), |_, window, _| {
         let mut previous_end = px(0.);
-        for id in ["全部", "文件", "内容", "剪贴板", "卸载", "系统", "提醒"] {
+        for id in [
+            "全部",
+            "文件",
+            "内容",
+            "剪贴板",
+            "卸载",
+            "系统",
+            "提醒",
+            "监控",
+        ] {
             let button = window.find(id);
             let bounds = button.bounds();
             assert!(button.visible());
@@ -638,4 +653,53 @@ fn mode_navigation_fits_the_launcher_width(cx: &mut TestAppContext) {
         }
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn monitor_filters_sorts_and_samples_only_while_its_panel_is_open(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    launcher.update(cx, |this, _| this.monitor_worker = Some(sender));
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.click("监控", cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(receiver.try_recv().unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            assert_eq!(this.query.mode, Mode::Monitor);
+            assert!(this.results.is_empty());
+            this.input.update(cx, |input, cx| {
+                input.set_value("/monitor Chrome", window, cx)
+            });
+            this.search(cx);
+            assert_eq!(this.query.text, "Chrome");
+            assert!(receiver.try_recv().is_err(), "filtering restarted sampling");
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.click("内存", cx))
+        .unwrap();
+    assert!(launcher.read_with(cx, |this, _| this.monitor_sort == monitor::Sort::Memory));
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| this.open_settings(window, cx));
+    })
+    .unwrap();
+    assert!(!receiver.try_recv().unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| this.close_settings(window, cx));
+    })
+    .unwrap();
+    assert!(receiver.try_recv().unwrap());
+    for _ in 0..2 {
+        cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+            .unwrap();
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        launcher.read_with(cx, |this, _| this.query.mode),
+        Mode::Apps
+    );
+    assert!(!receiver.try_recv().unwrap());
 }

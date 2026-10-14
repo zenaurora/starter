@@ -13,6 +13,7 @@ gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
         AppWindow,
+        Activity,
         FolderSearch,
         FolderPlus,
         Keyboard,
@@ -54,12 +55,9 @@ fn main() {
                 window_bounds: Some(WindowBounds::centered(size(px(720.), px(560.)), cx)),
                 // 不使用系统标题栏（采用自定义标题栏）
                 titlebar: None,
-                // macOS 菜单级弹窗会遮住输入法候选框，使用可激活的浮动窗口。
-                kind: if cfg!(target_os = "macos") {
-                    WindowKind::Floating
-                } else {
-                    WindowKind::PopUp
-                },
+                // Create a nonactivating NSPanel on macOS. The platform layer
+                // lowers its level so it does not cover IME candidate windows.
+                kind: WindowKind::PopUp,
                 // 禁止用户调整窗口大小
                 is_resizable: false,
                 // 禁止最小化窗口

@@ -105,11 +105,15 @@ Starter 当前在 [`configure_launcher_window`](/Users/mkh/code1/starter/src/pla
 4. 打开时先把窗口放到 frontmost screen/current Space，再 `orderFrontRegardless`/`makeKey`，下一轮主线程事件中恢复输入控件 focus。不要把 `NSApp.activate(true)` 当成跨 Space 的唯一策略；如果输入法依赖可激活的面板，可以保留激活调用，同时由 collection behavior 负责 Space 归属。
 5. 每次改窗口策略都回归中文：拼音组合、候选框、提交中文、快捷键、全屏浏览器、普通窗口、多个显示器和 Stage Manager。输入法候选框是可见性/焦点策略的真实验收标准。
 
-## 本次实现
+## 当前实现与真实应用回归（2026-10-12）
 
-Starter 保留 `WindowKind::Floating`，因此没有改变此前已经验证过的中文拼音候选框路径。窗口创建后增加 `CanJoinAllApplications`（macOS 13 及以上）、`CanJoinAllSpaces` 和 `FullScreenAuxiliary`，并清理互斥的 `Primary/Auxiliary` 位。`hidesOnDeactivate` 关闭，显示/隐藏由 Starter 自己管理。
+仅给 `WindowKind::Floating` 增加 collection behavior 仍不够。在 macOS 26.6.2 上，用独立全屏 host 按真实 `Option+Space` 调起已安装的 Starter 0.5.0，以及从源码编译的版本，都出现了“应用成为前台、窗口却没有出现在当前全屏 Space”的失败。原生日志显示显示前 `isOnActiveSpace=false`；只增加 `orderFrontRegardless` 也未解决。
 
-UI 激活观察器不再在第一次失活回调中立即隐藏窗口，而是等待 150 毫秒并再次检查 key/active 状态；重新激活或再次显示会使旧的关闭任务失效。这样全屏 Space 切换的瞬时失活不会造成闪烁，真正点击外部应用后仍会自动收起。一个最小的全屏 host probe 已验证窗口保持在当前全屏 Space，并且第一次显示即可成为 key window。
+Starter 现在使用 GPUI 的 `WindowKind::PopUp`，让 `NSPanel` **创建时**就带有 `.nonactivatingPanel`。创建后将默认菜单级 level 降为 `.floating`（3），避免挡住中文候选框；保留 `CanJoinAllApplications`（macOS 13+）、`CanJoinAllSpaces` 和 `FullScreenAuxiliary`，清理互斥的 `Primary/Auxiliary` 位，并关闭 `hidesOnDeactivate`。
+
+显示时先 `orderFrontRegardless`、`makeKeyWindow`，再激活应用。实际 GPUI 输入测试表明，只成为 key 而不激活应用会把双拼 `ni` 输入成英文；保留应用激活后，候选框显示在 level 20，提交后搜索框得到“你”，同时面板仍在 host 的全屏 Space。收起时先对面板 `orderOut`，再隐藏应用，让键盘焦点回到全屏 host。原有 150 毫秒失焦宽限与 generation 失效机制继续处理异步激活。
+
+回归脚本 `scripts/test-macos-fullscreen.swift` 驱动真实 Starter 进程和全局快捷键，检查首次显示、当前全屏 Space、键盘焦点、再次隐藏以及前台/焦点恢复，连续三轮；`--ime` 额外检查系统中文候选框和实际文本提交。测试会创建临时全屏窗口并恢复原应用及输入源。此前只验证最小面板 probe 的结论不能替代这条真实应用链路。
 
 ## 局限
 

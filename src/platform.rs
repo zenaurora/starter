@@ -197,8 +197,9 @@ pub fn configure_launcher_window(window: &Window) {
                 let view = handle.ns_view.as_ptr().cast::<AnyObject>();
                 let native_window: *mut AnyObject = msg_send![view, window];
                 if let Some(native_window) = native_window.as_ref() {
-                    // Keep GPUI's Floating panel level, so system IME candidates
-                    // can appear above it. PopUp uses a much higher menu level.
+                    // GPUI creates PopUp as a nonactivating NSPanel, but at a
+                    // menu level that covers IME candidates. Use Floating level.
+                    let _: () = msg_send![native_window, setLevel: 3isize];
                     let mut behavior: usize = msg_send![native_window, collectionBehavior];
                     behavior |= (1 << 0) | (1 << 8); // CanJoinAllSpaces, FullScreenAuxiliary
                     if objc2::available!(macos = 13.0) {
@@ -208,8 +209,7 @@ pub fn configure_launcher_window(window: &Window) {
                         behavior |= 1 << 18;
                     }
                     let _: () = msg_send![native_window, setCollectionBehavior: behavior];
-                    // Launcher lifecycle is handled per window, not by hiding the
-                    // entire app (which AppKit may unhide during delayed activation).
+                    // Starter handles dismissal after the activation grace period.
                     let _: () = msg_send![native_window, setHidesOnDeactivate: false];
                 }
             }
@@ -236,7 +236,24 @@ pub fn hide(window: &mut Window, cx: &mut App) {
         }
         let _ = cx;
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{msg_send, runtime::AnyObject};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = HasWindowHandle::window_handle(window)
+            && let RawWindowHandle::AppKit(handle) = handle.as_raw()
+        {
+            // SAFETY: GPUI owns the live view/window; called on its UI thread.
+            unsafe {
+                let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+                let native_window: *mut AnyObject = msg_send![view, window];
+                let _: () = msg_send![native_window, orderOut: std::ptr::null::<AnyObject>()];
+            }
+        }
+        // Release application activation and the panel's keyboard focus.
+        cx.hide();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = window;
         cx.hide();
@@ -244,6 +261,27 @@ pub fn hide(window: &mut Window, cx: &mut App) {
 }
 
 pub fn show(window: &mut Window, cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{msg_send, runtime::AnyObject};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = HasWindowHandle::window_handle(window)
+            && let RawWindowHandle::AppKit(handle) = handle.as_raw()
+        {
+            // SAFETY: GPUI owns the live view/window; called on its UI thread.
+            unsafe {
+                let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+                let native_window: *mut AnyObject = msg_send![view, window];
+                // orderFrontRegardless 意思是强制把窗口移动到屏幕最前面，不管当前应用
+                let _: () = msg_send![native_window, orderFrontRegardless];
+                // 设置 keywindow 可以接收键盘event
+                let _: () = msg_send![native_window, makeKeyWindow];
+            }
+        }
+        // The panel's nonactivating style keeps it in the fullscreen Space.
+        // App activation is still needed for GPUI's IME candidate/commit path.
+        cx.activate(true);
+    }
     #[cfg(target_os = "windows")]
     {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -259,10 +297,9 @@ pub fn show(window: &mut Window, cx: &mut App) {
             }
         }
     }
-    // Floating is intentionally activating: GPUI's AppKit text-input path is
-    // what keeps macOS Pinyin candidates working. Collection behavior above
-    // keeps this activation on the current Space instead of switching to a
-    // private launcher Space.
-    cx.activate(true);
-    window.activate_window();
+    #[cfg(not(target_os = "macos"))]
+    {
+        cx.activate(true);
+        window.activate_window();
+    }
 }

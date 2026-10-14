@@ -192,7 +192,7 @@ impl Launcher {
         let operation = cx
             .background_executor()
             .spawn(async move { power.execute() });
-        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+        self.track_task(cx.spawn_in(window, async move |this, cx| {
             let result = operation.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.power_busy = false;

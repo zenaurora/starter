@@ -7144,7 +7144,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "starter"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -7172,6 +7172,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "strsim",
+ "sysinfo",
  "tempfile",
  "toml 1.1.6+spec-1.1.0",
  "tray-icon",

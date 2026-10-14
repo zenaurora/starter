@@ -86,6 +86,7 @@ pub enum Action {
     Power(Power),
     Settings(Setting),
     Reminders,
+    Monitor,
 }
 
 struct Command {
@@ -204,24 +205,44 @@ const COMMANDS: &[Command] = &[
         aliases: &["reminder", "remind", "提醒", "会议提醒", "开会提醒"],
         action: Action::Reminders,
     },
+    Command {
+        id: "monitor",
+        title: "系统监控",
+        detail: "查看 CPU、内存、磁盘和应用资源占用",
+        aliases: &[
+            "monitor",
+            "activity monitor",
+            "system monitor",
+            "监控",
+            "资源",
+            "活动监视器",
+        ],
+        action: Action::Monitor,
+    },
 ];
 
-pub fn candidates() -> Vec<Candidate> {
-    COMMANDS
-        .iter()
-        .map(|command| Candidate {
-            id: format!("command:{}", command.id),
-            title: command.title.into(),
-            detail: command.detail.into(),
-            aliases: command.aliases.iter().map(|s| (*s).into()).collect(),
-            path: PathBuf::new(),
-            kind: match command.action {
-                Action::Settings(_) => Kind::SystemSetting,
-                Action::Reminders => Kind::ReminderDraft,
-                Action::Power(_) => Kind::SystemCommand,
-            },
-        })
-        .collect()
+pub fn candidates() -> &'static [Candidate] {
+    // Builtins never change during a process lifetime. Build their owned search
+    // text once instead of allocating every name/alias on each input event.
+    static CANDIDATES: std::sync::LazyLock<Vec<Candidate>> = std::sync::LazyLock::new(|| {
+        COMMANDS
+            .iter()
+            .map(|command| Candidate {
+                id: format!("command:{}", command.id),
+                title: command.title.into(),
+                detail: command.detail.into(),
+                aliases: command.aliases.iter().map(|s| (*s).into()).collect(),
+                path: PathBuf::new(),
+                kind: match command.action {
+                    Action::Settings(_) => Kind::SystemSetting,
+                    Action::Reminders => Kind::ReminderDraft,
+                    Action::Monitor => Kind::Monitor,
+                    Action::Power(_) => Kind::SystemCommand,
+                },
+            })
+            .collect()
+    });
+    &CANDIDATES
 }
 pub fn resolve(id: &str) -> Option<Action> {
     let id = id.strip_prefix("command:")?;
@@ -242,8 +263,10 @@ mod tests {
             ("重启", Action::Power(Power::Restart)),
             ("Lock", Action::Power(Power::Lock)),
             ("Reminder", Action::Reminders),
+            ("monitor", Action::Monitor),
+            ("监控", Action::Monitor),
         ] {
-            let results = crate::search::rank(&candidates, query, &Default::default());
+            let results = crate::search::rank(candidates, query, &Default::default());
             assert_eq!(resolve(&results[0].id), Some(action));
         }
         assert!(Power::Restart.requires_confirmation());

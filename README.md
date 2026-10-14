@@ -4,7 +4,7 @@ A native desktop launcher built with Rust and GPU rendering. Fast, lightweight, 
 
 **macOS** `Option+Space` · **Windows** `Ctrl+Space`
 
-[Starter 0.5.0 release notes](docs/releases/0.5.0.md)
+[Starter 0.6.0 release notes](docs/releases/0.6.0.md)
 
 ## What it does
 
@@ -15,6 +15,7 @@ Launch apps, search files, grab clipboard history, and manage quick reminders �
 - **Clipboard manager** for text, images, URLs, and files
 - **Quick reminders** with natural time parsing
 - **System commands** — lock, sleep, restart, shutdown, settings shortcuts
+- **Resource monitor** — live CPU, memory, startup disk capacity, and per-app usage
 - **App uninstall** with confirmation and system integration
 - **Auto-updates** with download progress and rollback
 - Runs from the menu bar; stays fast with native rendering
@@ -54,6 +55,8 @@ Type to search apps, or use these shortcuts:
 | `bluetooth` / `display` | Opens system settings directly |
 | `/remind 10m meeting` | Creates reminder in 10 minutes |
 | `/remind tomorrow 15:00 call` | Creates reminder tomorrow at 3 PM |
+| `monitor` / `监控` | Finds the system monitor command |
+| `/monitor Chrome` | Shows resource usage, filtered to matching apps/processes |
 
 Click mode buttons to browse by category. `↑↓` to select, `Enter` to open, `⌘/Ctrl+Enter` to reveal in Finder/Explorer, `Shift+Enter` to copy path. Star apps to favorite them — they float to the top.
 
@@ -97,6 +100,8 @@ File search respects `.gitignore` and skips hidden files, `.git`, `node_modules`
 
 Reminders run entirely local in `reminders.json`. The app must stay running to send notifications on time. If you quit or sleep, missed reminders show up when you reopen.
 
+The **监控** tab shows CPU, memory, and startup disk capacity, plus a sortable application/process list. Click **CPU** or **内存** to change ranking; type after `/monitor` to filter names. CPU and memory refresh every second while this panel is open; disk capacity refreshes every 15 seconds. Sampling pauses when you leave, hide Starter, or open settings. macOS helper processes are grouped under their outermost `.app` bundle. CPU percentages use the whole machine as 100%; application memory sums resident pages, including shared pages, so app totals may exceed system memory. Disk usage means occupied capacity, not read/write throughput. No additional permissions or network access are needed.
+
 System commands use native APIs — macOS uses system preference URLs and runtime-resolved interfaces; Windows uses `ms-settings:` and official uninstallers. No shell command injection, no forced quits.
 
 ## Why it exists
@@ -116,6 +121,10 @@ cargo test --locked --all-targets
 # Test macOS updater with a temp app copy
 bash scripts/bundle-macos.sh --debug
 python3 scripts/test-macos-updater.py
+
+# With one Starter running on Alt+Space and Accessibility enabled for the terminal:
+# test its real hotkey, fullscreen overlay, focus restoration and Chinese input
+xcrun swift scripts/test-macos-fullscreen.swift --ime
 ```
 
 Push a tag starting with `v` to trigger GitHub Actions — builds macOS (Apple Silicon + Intel) and Windows installers automatically.

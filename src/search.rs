@@ -7,6 +7,7 @@ use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     io::Read,
     path::{Path, PathBuf},
@@ -14,6 +15,8 @@ use std::{
 };
 
 pub const RESULT_LIMIT: usize = 100;
+const RANK_BATCH: usize = 4096;
+const EXACT_SCORE: u32 = 300_000;
 const FILE_LIMIT: usize = 100_000;
 const CONTENT_FILE_LIMIT: u64 = 2 * 1024 * 1024;
 
@@ -26,6 +29,7 @@ pub enum Mode {
     Clipboard,
     System,
     Reminders,
+    Monitor,
 }
 
 impl Mode {
@@ -38,6 +42,7 @@ impl Mode {
             Self::Clipboard => "剪贴板历史",
             Self::System => "系统命令与设置",
             Self::Reminders => "提醒",
+            Self::Monitor => "系统监控",
         }
     }
 
@@ -50,6 +55,7 @@ impl Mode {
             Self::Clipboard => "/clip ",
             Self::System => "/system ",
             Self::Reminders => "/remind ",
+            Self::Monitor => "/monitor ",
         }
     }
 }
@@ -73,6 +79,7 @@ impl Query {
             ("/settings", Mode::System),
             ("/remind", Mode::Reminders),
             ("/reminder", Mode::Reminders),
+            ("/monitor", Mode::Monitor),
         ] {
             if let Some(rest) = input.strip_prefix(prefix)
                 && (rest.is_empty() || rest.starts_with(char::is_whitespace))
@@ -115,6 +122,7 @@ pub enum Kind {
     SystemSetting,
     Reminder,
     ReminderDraft,
+    Monitor,
 }
 
 impl Kind {
@@ -133,6 +141,7 @@ impl Kind {
             Self::SystemSetting => "系统设置",
             Self::Reminder => "提醒",
             Self::ReminderDraft => "新建提醒",
+            Self::Monitor => "系统监控",
         }
     }
 }
@@ -191,8 +200,8 @@ pub fn rank(
     rank_apps(candidates, query, usage, &BTreeSet::new())
 }
 
-pub fn rank_apps(
-    candidates: &[Candidate],
+pub fn rank_apps<'a>(
+    candidates: impl IntoIterator<Item = &'a Candidate>,
     query: &str,
     usage: &BTreeMap<String, Usage>,
     favorites: &BTreeSet<String>,
@@ -201,61 +210,113 @@ pub fn rank_apps(
         .unwrap_or_default()
 }
 
-pub fn rank_cancellable(
-    candidates: &[Candidate],
-    query: &str,
-    usage: &BTreeMap<String, Usage>,
-    cancelled: &AtomicBool,
-) -> Option<Vec<Candidate>> {
-    rank_with_preferences(candidates, query, usage, &BTreeSet::new(), cancelled)
-}
-
-fn rank_with_preferences(
-    candidates: &[Candidate],
+fn rank_with_preferences<'a, T: SearchEntry + 'a>(
+    candidates: impl IntoIterator<Item = &'a T>,
     query: &str,
     usage: &BTreeMap<String, Usage>,
     favorites: &BTreeSet<String>,
     cancelled: &AtomicBool,
 ) -> Option<Vec<Candidate>> {
+    if query.is_empty() {
+        // 无需计算匹配分数，只需要计算偏好
+        return select_top_candidates(candidates, usage, favorites, cancelled, |_, _| Some(0));
+    }
+
     let query = query.to_lowercase();
     let pattern = Pattern::new(
         &query,
-        CaseMatching::Ignore,
+        CaseMatching::Ignore, // 不区分大小写
         Normalization::Smart,
-        AtomKind::Fuzzy,
+        AtomKind::Fuzzy, // 模糊匹配模式
     );
     let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
     let mut buffer = Vec::new();
-    let mut scored = Vec::new();
+
+    select_top_candidates(
+        candidates,
+        usage,
+        favorites,
+        cancelled,
+        |candidate, lower| {
+            let title = candidate.title();
+            let mut best = score_name(&title, lower, &query, &pattern, &mut matcher, &mut buffer);
+            for alias in candidate.aliases() {
+                // Exact matches are the score ceiling; later aliases cannot improve it.
+                if best == Some(EXACT_SCORE) {
+                    break;
+                }
+                let lower = alias.to_lowercase();
+                best = best.max(score_name(
+                    alias,
+                    &lower,
+                    &query,
+                    &pattern,
+                    &mut matcher,
+                    &mut buffer,
+                ));
+            }
+            best
+        },
+    )
+}
+
+struct Scored<'a, T> {
+    score: u32,
+    favorite: bool,
+    count: u64,
+    last_opened: u64,
+    lower_title: Cow<'a, str>,
+    id: Cow<'a, str>, // 对于 file 来说 id 是 path
+    entry: &'a T,
+}
+
+fn select_top_candidates<'a, T: SearchEntry + 'a>(
+    candidates: impl IntoIterator<Item = &'a T>,
+    usage: &BTreeMap<String, Usage>,
+    favorites: &BTreeSet<String>,
+    cancelled: &AtomicBool,
+    mut score_candidate: impl FnMut(&T, &str) -> Option<u32>,
+) -> Option<Vec<Candidate>> {
+    let candidates = candidates.into_iter();
+    let mut scored = Vec::with_capacity(RANK_BATCH.min(candidates.size_hint().0));
+    let compare = |a: &Scored<'_, T>, b: &Scored<'_, T>| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| b.favorite.cmp(&a.favorite))
+            .then_with(|| b.count.cmp(&a.count))
+            .then_with(|| b.last_opened.cmp(&a.last_opened))
+            .then_with(|| a.lower_title.cmp(&b.lower_title))
+            .then_with(|| a.id.cmp(&b.id))
+    };
     for candidate in candidates {
         if cancelled.load(Ordering::Relaxed) {
             return None;
         }
-        let score = std::iter::once(candidate.title.as_str())
-            .chain(candidate.aliases.iter().map(String::as_str))
-            .filter_map(|name| score_name(name, &query, &pattern, &mut matcher, &mut buffer))
-            .max();
-        if let Some(score) = score {
-            let usage = usage.get(&candidate.id).cloned().unwrap_or_default();
-            scored.push((
+        let lower = candidate.lower_title();
+        if let Some(score) = score_candidate(candidate, &lower) {
+            let id = candidate.id();
+            let (count, last_opened) = usage
+                .get(id.as_ref())
+                .map_or((0, 0), |usage| (usage.count, usage.last_opened));
+            scored.push(Scored {
                 score,
-                favorites.contains(&candidate.id),
-                usage.count,
-                usage.last_opened,
-                candidate.title.to_lowercase(),
-                candidate,
-            ));
+                favorite: favorites.contains(id.as_ref()),
+                count,
+                last_opened,
+                lower_title: lower,
+                id,
+                entry: candidate,
+            });
+            // Discard losers in bounded batches instead of retaining one score
+            // and lowercase String for every match in a 100,000-entry file index.
+            if scored.len() == RANK_BATCH {
+                scored.select_nth_unstable_by(RESULT_LIMIT, compare);
+                scored.truncate(RESULT_LIMIT);
+            }
         }
     }
-    type Scored<'a> = (u32, bool, u64, u64, String, &'a Candidate);
-    let compare = |a: &Scored<'_>, b: &Scored<'_>| {
-        b.0.cmp(&a.0)
-            .then_with(|| b.1.cmp(&a.1))
-            .then_with(|| b.2.cmp(&a.2))
-            .then_with(|| b.3.cmp(&a.3))
-            .then_with(|| a.4.cmp(&b.4))
-            .then_with(|| a.5.id.cmp(&b.5.id))
-    };
+
+    // 只展示前 100 条
     if scored.len() > RESULT_LIMIT {
         scored.select_nth_unstable_by(RESULT_LIMIT, compare);
         scored.truncate(RESULT_LIMIT);
@@ -264,7 +325,7 @@ fn rank_with_preferences(
     Some(
         scored
             .into_iter()
-            .map(|(_, _, _, _, _, c)| c.clone())
+            .map(|item| item.entry.candidate())
             .collect(),
     )
 }
@@ -292,51 +353,174 @@ pub fn recent_apps(
 }
 
 fn score_name(
-    name: &str,
-    query: &str,
+    name: &str,  // 原始名字
+    lower: &str, // name 小写
+    query: &str, // 用户输入
     pattern: &Pattern,
     matcher: &mut Matcher,
     buffer: &mut Vec<char>,
 ) -> Option<u32> {
-    if query.is_empty() {
-        return Some(0);
-    }
-    let lower = name.to_lowercase();
+    // 精确匹配
     if lower == query {
-        return Some(300_000);
+        return Some(EXACT_SCORE);
     }
+    // 前缀匹配
     if lower.starts_with(query) {
         return Some(200_000 - lower.chars().count().min(10_000) as u32);
     }
+    // nucleo 模糊匹配
+    // buffer 是传进来用来复用的，减少重复内存分配
     if let Some(score) = pattern.score(Utf32Str::new(name, buffer), matcher) {
         return Some(100_000 + score.min(65_000));
     }
+
+    // Damerau-Levenshtein 容错匹配
+    // 容错机制会导致复杂度更高，nucleo 本身没有支持。fzf 有 --typo 的选项，但是默认也是不开启的
     let length = query.chars().count();
-    if !(3..=64).contains(&length) {
+    if length <= 3 || length >= 32 {
+        // 对应长度 3 个以内的没必要做容错
+        // 长度太长也是没必要，计算成本太高
         return None;
     }
+
     let tolerance = if length >= 7 { 2 } else { 1 };
-    let distance = std::iter::once(lower.as_str())
-        .chain(lower.split(|c: char| !c.is_alphanumeric()))
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            let prefix: String = word.chars().take(length).collect();
-            let prefix_distance = strsim::damerau_levenshtein(query, &prefix);
-            if word.chars().count().abs_diff(length) <= tolerance {
-                prefix_distance.min(strsim::damerau_levenshtein(query, word))
-            } else {
-                prefix_distance
+    std::iter::once(lower)
+        .chain(
+            lower
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|word| *word != lower && !word.is_empty()),
+        )
+        // example: "docker-compose-cli" → ["docker-compose-cli", "docker", "compose", "cli"]
+        // update: 避免不必要的 min，因为我只要能匹配上就行了，不用非要找到一个最小的 distance
+        .find_map(|word| {
+            if word.starts_with(query) {
+                return Some(10_000);
             }
+
+            let target = if word.chars().count() > length + tolerance {
+                let end = word
+                    .char_indices()
+                    .nth(length)
+                    .map_or(word.len(), |(i, _)| i);
+                &word[..end]
+            } else {
+                word
+            };
+
+            let distance = strsim::damerau_levenshtein(query, target);
+            (distance <= tolerance).then(|| 10_000 - distance as u32 * 1_000)
         })
-        .min()?;
-    (distance <= tolerance).then(|| 10_000 - distance as u32 * 1_000)
+    // .map(|word| {
+    //     if word.starts_with(query) {
+    //         return 0;
+    //     }
+    //     // 字符边界截取前缀，避免 UTF-8 切片错误
+    //     let target = if word.chars().count() > length + tolerance {
+    //         let end = word
+    //             .char_indices()
+    //             .nth(length)
+    //             .map_or(word.len(), |(i, _)| i);
+    //         &word[..end]
+    //     } else {
+    //         word
+    //     };
+
+    //     strsim::damerau_levenshtein(query, target)
+    // })
+    // .min()?;
+    // (distance <= tolerance as u32).then(|| 10_000 - distance as u32 * 1_000)
 }
 
 #[derive(Default)]
 pub struct FileIndex {
-    pub candidates: Vec<Candidate>,
+    files: Vec<FileEntry>,
     pub skipped: usize,
     pub truncated: bool,
+}
+
+struct FileEntry {
+    path: PathBuf,
+    // Walking Path components for every keystroke costs more than keeping the
+    // short filename. The full identity/parent path is still stored only once.
+    name: String,
+    lower: String,
+    kind: Kind,
+}
+
+// Ranking reads names/identity from either source. Only the final 100 file hits
+// need the UI's full Candidate representation (id, title, parent and path).
+trait SearchEntry {
+    fn title(&self) -> Cow<'_, str>;
+    fn lower_title(&self) -> Cow<'_, str> {
+        Cow::Owned(self.title().to_lowercase())
+    }
+    fn id(&self) -> Cow<'_, str>;
+    fn aliases(&self) -> &[String] {
+        &[]
+    }
+    fn candidate(&self) -> Candidate;
+}
+
+impl SearchEntry for Candidate {
+    fn title(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.title)
+    }
+    fn id(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.id)
+    }
+    fn aliases(&self) -> &[String] {
+        &self.aliases
+    }
+    fn candidate(&self) -> Candidate {
+        self.clone()
+    }
+}
+
+impl SearchEntry for FileEntry {
+    fn title(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.name)
+    }
+    fn lower_title(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.lower)
+    }
+    fn id(&self) -> Cow<'_, str> {
+        self.path.to_string_lossy()
+    }
+    fn candidate(&self) -> Candidate {
+        Candidate {
+            id: self.id().into_owned(),
+            title: self.title().into_owned(),
+            detail: self
+                .path
+                .parent()
+                .unwrap_or(&self.path)
+                .display()
+                .to_string(),
+            path: self.path.clone(),
+            kind: self.kind,
+            aliases: Vec::new(),
+        }
+    }
+}
+
+impl FileIndex {
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    pub fn search(&self, query: &str, cancelled: &AtomicBool) -> Option<Vec<Candidate>> {
+        rank_with_preferences(
+            &self.files,
+            query,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            cancelled,
+        )
+    }
 }
 
 pub fn file_index(roots: &[PathBuf], cancelled: &AtomicBool) -> FileIndex {
@@ -363,19 +547,18 @@ pub fn file_index(roots: &[PathBuf], cancelled: &AtomicBool) -> FileIndex {
             if !kind.is_file() && !kind.is_dir() {
                 continue;
             }
-            index.candidates.push(Candidate {
-                id: entry.path().display().to_string(),
-                title: entry.file_name().to_string_lossy().into_owned(),
-                detail: entry.path().parent().unwrap_or(root).display().to_string(),
+            let name = entry.file_name().to_string_lossy().into_owned();
+            index.files.push(FileEntry {
                 path: entry.path().to_path_buf(),
+                lower: name.to_lowercase(),
+                name,
                 kind: if kind.is_dir() {
                     Kind::Folder
                 } else {
                     Kind::File
                 },
-                aliases: Vec::new(),
             });
-            if index.candidates.len() >= FILE_LIMIT {
+            if index.len() >= FILE_LIMIT {
                 index.truncated = true;
                 return index;
             }
@@ -541,6 +724,9 @@ mod tests {
         assert_eq!(Query::parse("/remind 10m 开会").text, "10m 开会");
         assert_eq!(Query::parse("/reminder").mode, Mode::Reminders);
         assert_eq!(Query::parse("/reminder/file").mode, Mode::Apps);
+        assert_eq!(Query::parse("/monitor").mode, Mode::Monitor);
+        assert_eq!(Query::parse("/monitor Chrome").text, "Chrome");
+        assert_eq!(Query::parse("/monitor/file").mode, Mode::Apps);
     }
 
     #[test]
@@ -564,9 +750,6 @@ mod tests {
         assert!(rank(&apps, "zzzzzzzzzz", &BTreeMap::new()).is_empty());
         assert!(rank(&apps, "这是一个完全不存在的应用名称", &BTreeMap::new()).is_empty());
         assert_eq!(rank(&apps, "!Safari", &BTreeMap::new())[0].title, "Safari");
-        assert!(
-            rank_cancellable(&apps, "term", &BTreeMap::new(), &AtomicBool::new(true)).is_none()
-        );
     }
 
     #[test]
@@ -665,6 +848,74 @@ mod tests {
     }
 
     #[test]
+    fn bounded_ranking_keeps_the_global_top_results_and_identity_ties() {
+        let apps: Vec<_> = (0..12_500)
+            .rev()
+            .map(|index| {
+                let mut candidate = app(if index % 2 == 0 { "Tool" } else { "tool" });
+                candidate.id = format!("app:{index:05}");
+                candidate
+            })
+            .collect();
+        let usage: BTreeMap<_, _> = apps
+            .iter()
+            .enumerate()
+            .map(|(index, app)| {
+                (
+                    app.id.clone(),
+                    Usage {
+                        count: (index % 17) as u64,
+                        last_opened: (index % 23) as u64,
+                    },
+                )
+            })
+            .collect();
+        let favorites: BTreeSet<_> = apps.iter().step_by(151).map(|app| app.id.clone()).collect();
+        let mut expected: Vec<_> = apps.iter().collect();
+        expected.sort_unstable_by(|a, b| {
+            favorites
+                .contains(&b.id)
+                .cmp(&favorites.contains(&a.id))
+                .then_with(|| usage[&b.id].count.cmp(&usage[&a.id].count))
+                .then_with(|| usage[&b.id].last_opened.cmp(&usage[&a.id].last_opened))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let expected: Vec<_> = expected
+            .into_iter()
+            .take(RESULT_LIMIT)
+            .map(|app| &app.id)
+            .collect();
+        for query in ["", "tool"] {
+            let results = rank_apps(&apps, query, &usage, &favorites);
+            assert_eq!(
+                results.iter().map(|app| &app.id).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn file_hits_preserve_paths_types_and_duplicate_root_handling() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("项目");
+        std::fs::create_dir(&folder).unwrap();
+        let file = folder.join("项目计划.txt");
+        std::fs::write(&file, "text").unwrap();
+        let cancelled = AtomicBool::new(false);
+        let index = file_index(&[root.path().to_owned(), folder.clone()], &cancelled);
+        assert_eq!(index.len(), 2);
+        let hits = index.search("项目", &cancelled).unwrap();
+        assert_eq!(hits[0].kind, Kind::Folder);
+        let hit = hits.iter().find(|hit| hit.path == file).unwrap();
+        assert_eq!(hit.id, file.display().to_string());
+        assert_eq!(hit.title, "项目计划.txt");
+        assert_eq!(hit.detail, folder.display().to_string());
+        assert_eq!(hit.kind, Kind::File);
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(index.search("项目", &cancelled).is_none());
+    }
+
+    #[test]
     fn content_is_literal_and_ignores_binary_and_gitignore() {
         let root = std::env::temp_dir().join(format!("starter-search-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -687,9 +938,9 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(hits[0].detail.ends_with("notes.txt:1"));
         let files = file_index(std::slice::from_ref(&root), &AtomicBool::new(false));
-        assert!(!files.candidates.iter().any(|c| c.title == "ignored.txt"));
+        assert!(!files.files.iter().any(|c| c.title() == "ignored.txt"));
         assert_eq!(
-            rank(&files.candidates, "项目", &BTreeMap::new())[0].title,
+            files.search("项目", &AtomicBool::new(false)).unwrap()[0].title,
             "项目计划.txt"
         );
         let mut chinese_hits = Vec::new();
