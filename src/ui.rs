@@ -528,13 +528,7 @@ impl Launcher {
         self.update_cancelled = Arc::new(AtomicBool::new(false));
         let cancel = self.update_cancelled.clone();
         let (sender, receiver) = async_channel::unbounded();
-        self.set_update_status(
-            UpdateStatus::Downloading {
-                received: 0,
-                total: 0,
-            },
-            cx,
-        );
+        self.set_update_status(UpdateStatus::Connecting, cx);
         let job = cx.background_executor().spawn(async move {
             updates::prepare_and_launch(&version, &assets, &cancel, |status| {
                 let _ = sender.try_send(status);

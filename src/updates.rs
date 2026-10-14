@@ -15,12 +15,14 @@ pub use install::{acknowledge_startup, run_helper, take_report};
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/zenaurora/starter/releases/latest";
 const MAX_DOWNLOAD: u64 = 256 * 1024 * 1024;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Status {
     #[default]
     Idle,
     Checking,
+    Connecting,
     UpToDate,
     Available {
         version: String,
@@ -29,6 +31,9 @@ pub enum Status {
     },
     Downloading {
         received: u64,
+        total: u64,
+    },
+    Verifying {
         total: u64,
     },
     Preparing,
@@ -42,13 +47,37 @@ impl Status {
     pub fn busy(&self) -> bool {
         matches!(
             self,
-            Self::Checking | Self::Downloading { .. } | Self::Preparing | Self::Installing
+            Self::Checking
+                | Self::Connecting
+                | Self::Downloading { .. }
+                | Self::Verifying { .. }
+                | Self::Preparing
+                | Self::Installing
         )
     }
+
+    pub fn can_cancel(&self) -> bool {
+        matches!(
+            self,
+            Self::Connecting | Self::Downloading { .. } | Self::Verifying { .. } | Self::Preparing
+        )
+    }
+
+    pub fn progress(&self) -> Option<f32> {
+        match self {
+            Self::Downloading { received, total } if *total > 0 => {
+                Some((*received as f64 / *total as f64).clamp(0.0, 1.0) as f32)
+            }
+            Self::Verifying { .. } | Self::Preparing | Self::Installing => Some(1.0),
+            _ => None,
+        }
+    }
+
     pub fn label(&self) -> String {
         match self {
             Self::Idle => "尚未检查更新".into(),
-            Self::Checking => "正在检查更新…".into(),
+            Self::Checking => "正在连接 GitHub 检查更新…".into(),
+            Self::Connecting => "正在连接 GitHub 下载服务器…".into(),
             Self::UpToDate => "已是最新版本".into(),
             Self::Available { version, .. } => format!("发现新版本 {version}"),
             Self::Downloading { total: 0, .. } => "正在准备下载…".into(),
@@ -58,9 +87,10 @@ impl Status {
                 *received as f64 / 1048576.,
                 *total as f64 / 1048576.
             ),
-            Self::Preparing => "下载已校验，正在准备安装…".into(),
+            Self::Verifying { .. } => "下载完成，正在校验安装包（SHA-256）…".into(),
+            Self::Preparing => "安装包已校验，正在准备安装（挂载并检查应用）…".into(),
             Self::Cancelled => "下载已取消，可重新更新".into(),
-            Self::Installing => "正在安装，即将重新启动…".into(),
+            Self::Installing => "安装助手已启动，正在替换应用并重新启动…".into(),
             Self::Updated(version) => format!("已更新到 {version}"),
             Self::Failed(error) => format!("更新失败：{error}"),
         }
@@ -91,8 +121,11 @@ pub fn check() -> Result<Status> {
 }
 
 fn agent(timeout: u64) -> ureq::Agent {
+    // ureq reads HTTP_PROXY/HTTPS_PROXY/NO_PROXY when the agent is created.
+    // A Finder-launched macOS app may not inherit the shell environment.
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(timeout)))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
         .build()
         .into()
 }
@@ -103,7 +136,7 @@ fn check_at(endpoint: &str, current: &str) -> Result<Status> {
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", concat!("Starter/", env!("CARGO_PKG_VERSION")))
         .call()
-        .context("无法连接 GitHub，请稍后重试")?;
+        .context("无法连接 GitHub，请检查网络或代理设置后重试")?;
     let body = response
         .body_mut()
         .with_config()
@@ -209,6 +242,7 @@ fn copy_verified(
         }
     }
     ensure!(received == asset.size, "安装包下载不完整");
+    progress(Status::Verifying { total: asset.size });
     let actual = format!("sha256:{:x}", hash.finalize());
     ensure!(
         asset
@@ -228,15 +262,16 @@ fn download(
     cancelled: &AtomicBool,
     progress: &mut impl FnMut(Status),
 ) -> Result<()> {
-    progress(Status::Downloading {
-        received: 0,
-        total: asset.size,
-    });
+    progress(Status::Connecting);
     let mut response = agent(300)
         .get(&asset.browser_download_url)
         .header("User-Agent", concat!("Starter/", env!("CARGO_PKG_VERSION")))
         .call()
-        .context("无法下载安装包")?;
+        .context("无法连接 GitHub 下载服务器，请检查网络或代理设置后重试")?;
+    progress(Status::Downloading {
+        received: 0,
+        total: asset.size,
+    });
     let file = std::fs::File::create(path)?;
     copy_verified(
         response.body_mut().as_reader(),
@@ -308,15 +343,17 @@ mod tests {
         let asset = asset("0.4.0", "macos-arm64", "dmg", b"verified");
         let cancel = AtomicBool::new(false);
         let mut output = Vec::new();
+        let mut statuses = Vec::new();
         copy_verified(
             Cursor::new(b"verified"),
             &mut output,
             &asset,
             &cancel,
-            &mut |_| {},
+            &mut |status| statuses.push(status),
         )
         .unwrap();
         assert_eq!(output, b"verified");
+        assert!(matches!(statuses.last(), Some(Status::Verifying { .. })));
         for bytes in [b"corrupt!".as_slice(), b"short", b"verified-long"] {
             assert!(
                 copy_verified(Cursor::new(bytes), Vec::new(), &asset, &cancel, &mut |_| {})

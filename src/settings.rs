@@ -1108,15 +1108,31 @@ impl Settings {
                 .child(div().text_size(px(12.)).text_color(theme.muted_foreground)
                     .child("启动时及运行期间每 24 小时检查一次。保存设置后生效。"))
                 .child(div().text_size(px(12.)).child(self.update_status.label()))
+                .when_some(self.update_status.progress(), |body, progress| body.child(
+                    div()
+                        .h(px(6.))
+                        .w_full()
+                        .bg(theme.border)
+                        .rounded_sm()
+                        .child(div().h_full().w(relative(progress)).bg(theme.primary)),
+                ))
+                .when(matches!(self.update_status, UpdateStatus::Connecting), |body| {
+                    body.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.muted_foreground)
+                            .child("如果长时间停留在连接阶段，请检查 GitHub 网络或代理；GUI 启动不会自动继承终端代理。"),
+                    )
+                })
                 .child(Button::new("check-updates").label("立即检查")
                     .disabled(self.update_status.busy())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(Event::CheckUpdates))))
                 .when(self.can_install && !self.update_status.busy(), |body| body.child(Button::new("install-update").label("下载并更新").primary()
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(Event::InstallUpdate)))))
-                .when(matches!(self.update_status, UpdateStatus::Downloading { .. }), |body| body.child(Button::new("cancel-update").label("取消下载")
+                .when(self.update_status.can_cancel(), |body| body.child(Button::new("cancel-update").label("取消更新")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(Event::CancelUpdate)))))
                 .child(div().text_size(px(11.)).text_color(theme.muted_foreground)
-                    .child("点击更新后自动下载、校验、安装并重新启动。配置和使用记录会保留。"))
+                    .child("流程：检查版本 → 连接服务器 → 下载 → 校验 SHA-256 → 准备安装 → 重启。配置和使用记录会保留。"))
                 .into_any_element(),
             Tab::General => {
                 if self.shortcut_editor_open {
