@@ -45,6 +45,9 @@ use std::{
     time::Duration,
 };
 
+// 普通搜索界面失去窗口激活后，先等 150 ms 再复核是否隐藏。
+// 原生窗口激活、Space 切换等过程可能短暂报告未激活，立即隐藏容易造成闪烁。
+// timer 的等待会让出执行权，不会阻塞 UI 线程；实际复核时间还取决于调度。
 const ACTIVATION_LOSS_GRACE: Duration = Duration::from_millis(150);
 
 pub struct Launcher {
@@ -56,6 +59,9 @@ pub struct Launcher {
     icons: Icons,
     config: Config,
     config_path: PathBuf,
+    // 持有托盘、全局快捷键管理器等系统资源，不是终端或命令行 shell。
+    // Some 表示系统外壳已建立；None 时 hide() 会直接返回，避免窗口隐藏后难以再次呼出。
+    // Some 不保证每个快捷键都注册成功，具体绑定仍可能有单独的警告。
     shell: Option<Shell>,
     history: History,
     clipboard_entries: Vec<clipboard::Entry>,
@@ -97,7 +103,14 @@ pub struct Launcher {
     cancelled: Arc<AtomicBool>,
     scroll: UniformListScrollHandle,
     status: String,
+    // Starter 维护的“已展开”逻辑状态。show()/打开设置等入口设为 true，hide() 设为 false。
+    // 隐藏只是收起窗口，Launcher 实体、托盘和后台服务仍可继续存在。
+    // 它不查询系统，也不保证窗口此刻已显示、位于当前 Space 或拿到了键盘焦点。
+    // 因此 visible == true 与 window.is_window_active() == false 可以同时成立。
     visible: bool,
+    // 窗口显示/隐藏与激活处理的代号，用来使过期的延迟隐藏请求失效。
+    // 任务保存创建时的代号，醒来后只有代号仍一致，才允许继续检查是否隐藏。
+    // 递增不会立刻终止旧任务；旧任务仍会醒来，但比较不通过就不会操作窗口。
     activation_generation: u64,
     searching: bool,
     update_status: UpdateStatus,
@@ -399,9 +412,15 @@ impl Launcher {
 
     fn observe_activation(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         cx.observe_window_activation(window, |this, window, cx| {
+            // active 是本次通知到来时读取的窗口激活状态快照，不是 Launcher 字段。
+            // is_window_active() 是读取函数，不负责设置激活状态；show() 中的平台调用
+            // 会向系统请求显示/激活，GPUI 再通过窗口事件更新它所记录的状态。
+            // 窗口激活与输入框焦点也是两层状态：窗口激活后，还需要 input.focus()。
             let active = window.is_window_active();
-            let can_dismiss = this.shell.is_some();
-            this.handle_activation_change(active, can_dismiss, window, cx);
+            // shell_ready 表示系统外壳是否已建立，是允许自动隐藏的一个前提。
+            // 它不是“现在一定应该隐藏”：设置页、确认框等状态还会阻止自动隐藏。
+            let shell_ready = this.shell.is_some();
+            this.handle_activation_change(active, shell_ready, window, cx);
         })
     }
 
@@ -415,17 +434,21 @@ impl Launcher {
     fn handle_activation_change(
         &mut self,
         active: bool,
-        can_dismiss: bool,
+        shell_ready: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         #[cfg(target_os = "macos")]
         if let Some(task) = &self.uninstall_task {
+            // 内嵌卸载任务面板单独管理焦点，不走下面普通搜索界面的失活隐藏流程。
             if active && self.visible {
                 task.update(cx, |task, cx| task.focus(window, cx));
             }
             return;
         }
+        // 这里组合两个不同来源的状态：active 描述窗口当前是否激活，visible 描述
+        // Starter 是否处于展开状态。激活且展开、也没有其他面板占用交互时，
+        // 才把键盘焦点交回搜索框，避免抢走设置页、确认框或提醒面板的输入。
         if active
             && self.visible
             && self.settings.is_none()
@@ -435,17 +458,26 @@ impl Launcher {
             && !self.power_busy
             && self.reminder_panel.is_none()
         {
+            // 进入这个分支说明普通搜索界面重新激活，使之前安排的隐藏请求过期。
             self.activation_generation = self.activation_generation.wrapping_add(1);
             self.input.update(cx, |input, cx| input.focus(window, cx));
-        } else if self.should_hide_on_activation_loss(active, can_dismiss) {
+        } else if self.should_hide_on_activation_loss(active, shell_ready) {
+            // 第一次检查只决定“是否安排延迟复核”，并不立即隐藏。
+            // 例：失活 → 安排任务 A → 用户再次呼出 → show() 递增代号，
+            // A 醒来时发现代号已变，就不能把刚呼出的窗口隐藏。
             self.activation_generation = self.activation_generation.wrapping_add(1);
             let generation = self.activation_generation;
             self.track_task(cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(ACTIVATION_LOSS_GRACE).await;
                 let _ = this.update_in(cx, |this, window, cx| {
+                    // 等待期间用户可能重新呼出窗口、打开设置或恢复窗口激活。
+                    // 所以必须同时检查：任务代号仍有效，以及现在仍满足隐藏条件。
+                    // active 要重新读取，不能沿用 150 ms 前的快照；面板状态也从 this
+                    // 重新读取。shell_ready 则仍是安排任务时捕获的 shell 是否存在。
+                    // 即使代号没变，只要窗口已重新激活，下面的判断也会阻止隐藏。
                     if this.activation_generation == generation
                         && this
-                            .should_hide_on_activation_loss(window.is_window_active(), can_dismiss)
+                            .should_hide_on_activation_loss(window.is_window_active(), shell_ready)
                     {
                         this.hide(window, cx);
                     }
@@ -455,10 +487,14 @@ impl Launcher {
         cx.notify();
     }
 
-    fn should_hide_on_activation_loss(&self, active: bool, can_dismiss: bool) -> bool {
+    fn should_hide_on_activation_loss(&self, active: bool, shell_ready: bool) -> bool {
+        // 只判断，不修改状态、不操作原生窗口。安排任务前和任务醒来后各调用一次。
+        // 自动隐藏要求：窗口未激活、Launcher 仍展开、系统外壳已建立，且没有
+        // 设置页、错误框、卸载确认、电源确认/操作、提醒面板等需要保留的交互。
+        // 内嵌卸载任务面板已在 handle_activation_change() 开头单独处理。
         !active
             && self.visible
-            && can_dismiss
+            && shell_ready
             && self.settings.is_none()
             && self.error_dialog.is_none()
             && self.uninstall_confirmation.is_none()
@@ -1071,6 +1107,7 @@ impl Launcher {
     }
 
     fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 与 shell_ready 来自同一前提，在真正隐藏的入口再保护一次。
         if self.shell.is_none() {
             return;
         }
