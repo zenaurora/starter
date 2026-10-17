@@ -10,6 +10,9 @@ use std::{
 };
 use sysinfo::{Disks, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+mod actions;
+pub use actions::{Action, perform};
+
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
@@ -29,8 +32,18 @@ pub struct ProcessUsage {
     pub name: String,
     pub path: Option<PathBuf>,
     pub process_count: usize,
+    /// Exact processes represented by this row, captured with the sample.
+    pub members: Vec<ProcessIdentity>,
     pub cpu_percent: f32,
     pub memory: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    /// Unix epoch seconds, as reported by sysinfo on both supported platforms.
+    pub start_time: u64,
+    pub exe: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -158,6 +171,11 @@ fn snapshot(system: &System, disks: &Disks) -> Snapshot {
             name,
             path,
             process_count: 1,
+            members: vec![ProcessIdentity {
+                pid: process.pid().as_u32(),
+                start_time: process.start_time(),
+                exe: process.exe().map(Path::to_path_buf),
+            }],
             cpu_percent: process.cpu_usage() / cores,
             memory: process.memory(),
         }
@@ -181,6 +199,7 @@ fn aggregate(rows: impl Iterator<Item = ProcessUsage>) -> Vec<ProcessUsage> {
             group.cpu_percent += row.cpu_percent;
             group.memory = group.memory.saturating_add(row.memory);
             group.process_count += row.process_count;
+            group.members.extend(row.members);
         } else {
             groups.insert(row.id.clone(), row);
         }
@@ -248,6 +267,7 @@ mod tests {
                     name: format!("App {i}"),
                     path: None,
                     process_count: 1,
+                    members: vec![],
                     cpu_percent: i as f32,
                     memory: 20 - i,
                 })
@@ -319,6 +339,11 @@ mod tests {
                 name: "Example".into(),
                 path: Some(path),
                 process_count: 1,
+                members: vec![ProcessIdentity {
+                    pid: 100 + p.len() as u32,
+                    start_time: 1,
+                    exe: Some(PathBuf::from(p)),
+                }],
                 cpu_percent: 10.0,
                 memory: 100,
             }
@@ -326,6 +351,7 @@ mod tests {
         let groups = aggregate(rows);
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].process_count, 2);
+        assert_eq!(groups[0].members.len(), 2);
         assert_eq!(groups[0].cpu_percent, 20.0);
         assert_eq!(groups[0].memory, 200);
         assert_eq!(app_bundle(Path::new("/usr/bin/worker")), None);

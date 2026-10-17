@@ -1,6 +1,6 @@
 use super::*;
 use core::prelude::v1::test;
-use gpui_kit::{base::Root, test::TestWindowExt};
+use gpui_kit::{InputEvent, base::Root, test::TestWindowExt};
 
 fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
     cx.update(gpui_kit::init);
@@ -77,6 +77,9 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         monitor_worker: None,
                         monitor_sampling: false,
                         monitor_sort: monitor::Sort::default(),
+                        monitor_selected: None,
+                        monitor_scroll: UniformListScrollHandle::new(),
+                        monitor_actions: None,
                         dialog_focus: cx.focus_handle(),
                         candidates: Vec::new(),
                         results,
@@ -702,4 +705,563 @@ fn monitor_filters_sorts_and_samples_only_while_its_panel_is_open(cx: &mut TestA
         Mode::Apps
     );
     assert!(!receiver.try_recv().unwrap());
+}
+
+fn monitor_snapshot() -> monitor::Snapshot {
+    monitor::Snapshot {
+        sampled_at: std::time::Instant::now(),
+        cpu_percent: 25.,
+        memory_used: 4 << 30,
+        memory_total: 16 << 30,
+        disk_used: 100 << 30,
+        disk_total: 500 << 30,
+        processes: [
+            ("Alpha", 30., 100 << 20),
+            ("Beta", 20., 300 << 20),
+            ("Gamma", 10., 200 << 20),
+        ]
+        .into_iter()
+        .map(|(name, cpu_percent, memory)| {
+            let path = PathBuf::from(format!("/Applications/Fixture {name}.app"));
+            monitor::ProcessUsage {
+                id: path.display().to_string(),
+                name: format!("Fixture {name}"),
+                path: Some(path.clone()),
+                process_count: 1,
+                // These fixtures can never pass action identity validation.
+                // No UI test may send a signal to a real process.
+                members: vec![monitor::ProcessIdentity {
+                    pid: u32::MAX,
+                    start_time: 0,
+                    exe: Some(path.join("Contents/MacOS/fixture")),
+                }],
+                cpu_percent,
+                memory,
+            }
+        })
+        .collect(),
+    }
+}
+
+#[gpui_kit::test]
+fn monitor_selection_tracks_identity_across_live_ranking_sorting_and_filtering(
+    cx: &mut TestAppContext,
+) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.receive_monitor_snapshot(monitor_snapshot());
+            this.open_monitor(window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(
+            launcher.read(cx).monitor_selected.as_deref(),
+            Some("/Applications/Fixture Alpha.app")
+        );
+        window.press("down", cx);
+        assert_eq!(
+            launcher.read(cx).monitor_selected.as_deref(),
+            Some("/Applications/Fixture Beta.app")
+        );
+        launcher.update(cx, |this, cx| {
+            let mut snapshot = monitor_snapshot();
+            snapshot.processes[0].cpu_percent = 5.;
+            snapshot.processes.reverse();
+            this.receive_monitor_snapshot(snapshot);
+            cx.notify();
+        });
+        assert_eq!(
+            launcher.read(cx).monitor_selected.as_deref(),
+            Some("/Applications/Fixture Beta.app"),
+            "a new ranking must not move selection to a different process"
+        );
+        window.click("内存", cx);
+        assert_eq!(
+            launcher.read(cx).monitor_selected.as_deref(),
+            Some("/Applications/Fixture Beta.app")
+        );
+        window.press("down", cx);
+        assert_eq!(
+            launcher.read(cx).monitor_selected.as_deref(),
+            Some("/Applications/Fixture Gamma.app")
+        );
+        launcher.update(cx, |this, cx| {
+            this.input
+                .update(cx, |input, cx| input.set_value("/monitor Beta", window, cx));
+            this.search(cx);
+        });
+        assert_eq!(
+            launcher.read(cx).monitor_selected.as_deref(),
+            Some("/Applications/Fixture Beta.app")
+        );
+        window.press("up", cx);
+        assert_eq!(
+            launcher.read(cx).monitor_selected.as_deref(),
+            Some("/Applications/Fixture Beta.app")
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn monitor_actions_keep_the_sampled_target_and_escape_preserves_the_filter(
+    cx: &mut TestAppContext,
+) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.receive_monitor_snapshot(monitor_snapshot());
+            this.open_monitor(window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("monitor-actions-/Applications/Fixture Alpha.app", cx);
+        assert!(launcher.read(cx).monitor_actions.is_some());
+        assert!(!launcher.read(cx).input.focus_handle(cx).is_focused(window));
+        launcher.update(cx, |this, cx| {
+            let mut snapshot = monitor_snapshot();
+            snapshot.processes[0].path = Some(PathBuf::from("/Applications/Replaced.app"));
+            this.receive_monitor_snapshot(snapshot);
+            this.input
+                .update(cx, |input, cx| input.set_value("/monitor Beta", window, cx));
+            this.search(cx);
+        });
+        window.click("monitor-copy-path", cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("/Applications/Fixture Alpha.app".into()),
+            "the action panel must retain the originally sampled target"
+        );
+        window.press("escape", cx);
+        assert!(launcher.read(cx).monitor_actions.is_none());
+        assert_eq!(launcher.read(cx).input.read(cx).value(), "/monitor Beta");
+        assert!(launcher.read(cx).input.focus_handle(cx).is_focused(window));
+        window.press("enter", cx);
+        window.click("monitor-copy-path", cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("/Applications/Fixture Beta.app".into())
+        );
+        window.click("monitor-actions-close", cx);
+        assert!(launcher.read(cx).monitor_actions.is_none());
+        window.right_click("monitor-actions-/Applications/Fixture Beta.app", cx);
+        assert!(launcher.read(cx).monitor_actions.is_some());
+        assert_eq!(launcher.read(cx).query.text, "Beta");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn monitor_destructive_actions_require_confirmation_and_ignore_plain_or_held_enter(
+    cx: &mut TestAppContext,
+) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.receive_monitor_snapshot(monitor_snapshot());
+            this.open_monitor(window, cx);
+            this.input.update(cx, |input, cx| {
+                input.set_value("/monitor Alpha", window, cx)
+            });
+            this.search(cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("enter", cx);
+        for action in ["monitor-terminate", "monitor-force-quit"] {
+            if cfg!(target_os = "windows") && action == "monitor-terminate" {
+                continue;
+            }
+            let task_count = launcher.read(cx)._tasks.len();
+            let status = launcher.read(cx).status.clone();
+            window.click(action, cx);
+            assert!(window.find("monitor-confirm-action").visible());
+            assert!(window.try_find("monitor-copy-path").is_none());
+            for _ in 0..8 {
+                if window.find("monitor-confirm-action").focused() == Some(true) {
+                    break;
+                }
+                window.press("tab", cx);
+            }
+            assert_eq!(
+                window.find("monitor-confirm-action").focused(),
+                Some(true),
+                "{action}: close={:?}, cancel={:?}, confirm={:?}",
+                window.find("monitor-actions-close"),
+                window.find("monitor-cancel-action"),
+                window.find("monitor-confirm-action"),
+            );
+            window.press("enter", cx);
+            window.dispatch_event(
+                KeyDownEvent {
+                    keystroke: Keystroke::parse(if cfg!(target_os = "macos") {
+                        "cmd-enter"
+                    } else {
+                        "ctrl-enter"
+                    })
+                    .unwrap(),
+                    is_held: true,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert_eq!(
+                launcher.read(cx)._tasks.len(),
+                task_count,
+                "choosing an action, Enter and a held confirmation shortcut must not execute it"
+            );
+            assert_eq!(launcher.read(cx).status, status);
+            window.press("escape", cx);
+            assert!(launcher.read(cx).monitor_actions.is_some());
+            assert!(window.find("monitor-copy-path").visible());
+        }
+        window.press("escape", cx);
+        assert!(launcher.read(cx).monitor_actions.is_none());
+        assert_eq!(launcher.read(cx).input.read(cx).value(), "/monitor Alpha");
+        assert!(launcher.read(cx).visible);
+        assert!(launcher.read(cx).input.focus_handle(cx).is_focused(window));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn monitor_confirming_a_stale_target_reports_failure_without_closing_the_panel(
+    cx: &mut TestAppContext,
+) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.receive_monitor_snapshot(monitor_snapshot());
+            this.open_monitor(window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("enter", cx);
+        window.click("monitor-force-quit", cx);
+        window.click("monitor-confirm-action", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        let state = launcher.read(cx);
+        assert!(state.monitor_actions.is_some());
+        assert!(state.status.contains("失败"), "{}", state.status);
+        assert!(
+            state.status.contains("已退出或身份已变化"),
+            "{}",
+            state.status
+        );
+        assert!(state.visible);
+        window.click("monitor-cancel-action", cx);
+        window.click("monitor-actions-close", cx);
+        assert!(launcher.read(cx).monitor_actions.is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn monitor_normal_quit_sends_the_request_without_an_extra_confirmation(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.receive_monitor_snapshot(monitor_snapshot());
+            this.open_monitor(window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("enter", cx);
+        window.click("monitor-quit", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        let state = launcher.read(cx);
+        assert!(state.monitor_actions.is_some());
+        assert!(state.status.starts_with("退出失败："), "{}", state.status);
+        assert!(
+            state.status.contains("已退出或身份已变化"),
+            "{}",
+            state.status
+        );
+        assert!(window.find("monitor-force-quit").visible());
+        assert!(window.try_find("monitor-confirm-action").is_none());
+        window.press("escape", cx);
+        assert!(launcher.read(cx).monitor_actions.is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn monitor_actions_support_keyboard_focus_navigation_and_activation(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.receive_monitor_snapshot(monitor_snapshot());
+            this.open_monitor(window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("enter", cx);
+        let selected = launcher.read(cx).monitor_selected.clone();
+        window.press("tab", cx);
+        let first_focus = window.focused(cx).unwrap();
+        window.press("down", cx);
+        assert_ne!(window.focused(cx), Some(first_focus.clone()));
+        window.press("up", cx);
+        assert_eq!(window.focused(cx), Some(first_focus));
+        let menu_buttons = [
+            "monitor-actions-close",
+            "monitor-reveal",
+            "monitor-copy-path",
+            "monitor-quit",
+            "monitor-terminate",
+            "monitor-force-quit",
+        ];
+        for iteration in 0..12 {
+            window.press("tab", cx);
+            assert!(
+                menu_buttons.iter().any(|&id| window
+                    .try_find(id)
+                    .is_some_and(|button| button.focused() == Some(true))),
+                "Tab escaped the monitor action menu at {iteration}: {:?}; container={}",
+                menu_buttons.map(|id| (id, window.try_find(id).and_then(|button| button.focused()))),
+                launcher.read(cx).dialog_focus.is_focused(window)
+            );
+        }
+        for _ in 0..12 {
+            window.press("shift-tab", cx);
+            assert!(
+                menu_buttons.iter().any(|&id| window
+                    .try_find(id)
+                    .is_some_and(|button| button.focused() == Some(true))),
+                "Shift+Tab escaped the monitor action menu"
+            );
+        }
+        assert_eq!(launcher.read(cx).monitor_selected, selected);
+        for _ in 0..8 {
+            if window.find("monitor-copy-path").focused() == Some(true) {
+                break;
+            }
+            window.press("tab", cx);
+        }
+        assert_eq!(window.find("monitor-copy-path").focused(), Some(true));
+        window.press("enter", cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("/Applications/Fixture Alpha.app".into())
+        );
+        for _ in 0..8 {
+            if window.find("monitor-quit").focused() == Some(true) {
+                break;
+            }
+            window.press("down", cx);
+        }
+        assert_eq!(window.find("monitor-quit").focused(), Some(true));
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(launcher.read_with(cx, |this, _| this.status.starts_with("退出失败：")));
+}
+
+#[gpui_kit::test]
+fn monitor_context_menu_keeps_the_list_visible_and_closes_on_an_outside_click(
+    cx: &mut TestAppContext,
+) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.receive_monitor_snapshot(monitor_snapshot());
+            this.open_monitor(window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        // A row near the right and lower edges exercises menu flipping.
+        let trigger = "monitor-actions-/Applications/Fixture Gamma.app";
+        let trigger_bounds = window.find(trigger).bounds();
+        window.right_click(trigger, cx);
+        let menu = window.find("monitor-actions-menu");
+        let bounds = menu.bounds();
+        assert!(menu.visible());
+        assert!(bounds.size.width <= px(320.), "{bounds:?}");
+        assert!(bounds.size.height < px(440.), "{bounds:?}");
+        assert!(bounds.origin.x >= px(0.) && bounds.origin.y >= px(0.));
+        assert!(bounds.origin.x + bounds.size.width <= px(720.));
+        assert!(bounds.origin.y + bounds.size.height <= px(560.));
+        assert!(
+            bounds.origin.x < trigger_bounds.origin.x,
+            "the menu should fit beside the right-edge trigger: {bounds:?}"
+        );
+        assert!(
+            window
+                .find("monitor-actions-/Applications/Fixture Alpha.app")
+                .visible(),
+            "opening actions replaced the monitor list"
+        );
+        assert!(window.find("内存").visible());
+        assert_eq!(launcher.read(cx).query.mode, Mode::Monitor);
+        let selected = launcher.read(cx).monitor_selected.clone();
+        let position = point(px(8.), px(8.));
+        window.dispatch_event(
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                modifiers: Default::default(),
+                click_count: 1,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+        assert!(launcher.read(cx).monitor_actions.is_none());
+        assert_eq!(launcher.read(cx).query.mode, Mode::Monitor);
+        assert_eq!(launcher.read(cx).monitor_selected, selected);
+        assert!(launcher.read(cx).visible);
+        assert!(launcher.read(cx).input.focus_handle(cx).is_focused(window));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn monitor_long_application_names_and_paths_keep_actions_inside_the_window(
+    cx: &mut TestAppContext,
+) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            let mut snapshot = monitor_snapshot();
+            let row = &mut snapshot.processes[0];
+            row.name = "Very Long Application 名称 ".repeat(5);
+            row.path = Some(PathBuf::from(format!(
+                "/Users/fixture/{}/{}.app",
+                "very-long-application-directory/".repeat(6),
+                row.name
+            )));
+            this.receive_monitor_snapshot(snapshot);
+            this.open_monitor(window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("enter", cx);
+        let menu = window.find("monitor-actions-menu").bounds();
+        assert!(menu.size.width <= px(320.), "{menu:?}");
+        assert!(menu.size.height < px(440.), "{menu:?}");
+        for id in [
+            "monitor-actions-close",
+            "monitor-reveal",
+            "monitor-copy-path",
+            "monitor-quit",
+            "monitor-force-quit",
+        ] {
+            let button = window.find(id);
+            let bounds = button.bounds();
+            assert!(button.visible(), "{id} is not visible");
+            assert!(
+                bounds.origin.x >= px(0.),
+                "{id} exceeds left edge: {bounds:?}"
+            );
+            assert!(
+                bounds.origin.y >= px(0.),
+                "{id} exceeds top edge: {bounds:?}"
+            );
+            assert!(
+                bounds.origin.x + bounds.size.width <= px(720.),
+                "{id} exceeds right edge: {bounds:?}"
+            );
+            assert!(
+                bounds.origin.y + bounds.size.height <= px(560.),
+                "{id} exceeds bottom edge: {bounds:?}"
+            );
+        }
+        window.click("monitor-force-quit", cx);
+        let confirmation = window.find("monitor-actions-menu").bounds();
+        assert!(confirmation.size.width <= px(320.), "{confirmation:?}");
+        assert!(confirmation.size.height < px(440.), "{confirmation:?}");
+        for id in [
+            "monitor-actions-close",
+            "monitor-cancel-action",
+            "monitor-confirm-action",
+        ] {
+            let bounds = window.find(id).bounds();
+            assert!(
+                bounds.origin.x >= px(0.) && bounds.origin.y >= px(0.),
+                "{id} exceeds window origin: {bounds:?}"
+            );
+            assert!(
+                bounds.origin.x + bounds.size.width <= px(720.)
+                    && bounds.origin.y + bounds.size.height <= px(560.),
+                "{id} exceeds window bounds: {bounds:?}"
+            );
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn monitor_previous_action_result_cannot_replace_a_new_panel(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.receive_monitor_snapshot(monitor_snapshot());
+            this.open_monitor(window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let new_status = cx
+        .update_window(handle.into(), |_, window, cx| {
+            window.press("enter", cx);
+            window.click("monitor-quit", cx);
+            launcher.update(cx, |this, cx| {
+                this.shell_event(ShellEvent::OpenSystem, window, cx);
+                assert!(this.monitor_actions.is_none());
+                this.open_monitor(window, cx);
+                this.monitor_selected = Some("/Applications/Fixture Beta.app".into());
+                this.open_monitor_actions(window, cx);
+                this.status.clone()
+            })
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(launcher.read(cx).monitor_actions.is_some());
+        assert_eq!(launcher.read(cx).status, new_status);
+        assert!(window.find("monitor-force-quit").visible());
+        assert!(window.try_find("monitor-confirm-action").is_none());
+        window.click("monitor-copy-path", cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("/Applications/Fixture Beta.app".into())
+        );
+    })
+    .unwrap();
 }

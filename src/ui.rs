@@ -91,6 +91,9 @@ pub struct Launcher {
     monitor_worker: Option<std::sync::mpsc::Sender<bool>>,
     monitor_sampling: bool,
     monitor_sort: monitor::Sort,
+    monitor_selected: Option<String>,
+    monitor_scroll: UniformListScrollHandle,
+    monitor_actions: Option<monitor_panel::Actions>,
     dialog_focus: FocusHandle,
     catalog: Catalog,
     candidates: Vec<Candidate>,
@@ -209,7 +212,7 @@ impl Launcher {
                 while let Ok(snapshot) = monitor_events.recv().await {
                     if this
                         .update_in(cx, |this, _, cx| {
-                            this.monitor_snapshot = Some(Arc::new(snapshot));
+                            this.receive_monitor_snapshot(snapshot);
                             if this.visible && this.query.mode == Mode::Monitor {
                                 cx.notify();
                             }
@@ -364,6 +367,9 @@ impl Launcher {
             monitor_worker: Some(monitor_worker),
             monitor_sampling: false,
             monitor_sort: monitor::Sort::default(),
+            monitor_selected: None,
+            monitor_scroll: UniformListScrollHandle::new(),
+            monitor_actions: None,
             dialog_focus: cx.focus_handle(),
             catalog: Catalog::default(),
             candidates: Vec::new(),
@@ -455,6 +461,7 @@ impl Launcher {
             && self.error_dialog.is_none()
             && self.uninstall_confirmation.is_none()
             && self.power_confirmation.is_none()
+            && self.monitor_actions.is_none()
             && !self.power_busy
             && self.reminder_panel.is_none()
         {
@@ -499,6 +506,7 @@ impl Launcher {
             && self.error_dialog.is_none()
             && self.uninstall_confirmation.is_none()
             && self.power_confirmation.is_none()
+            && self.monitor_actions.is_none()
             && !self.power_busy
             && self.reminder_panel.is_none()
     }
@@ -603,6 +611,9 @@ impl Launcher {
         self.cancelled = Arc::new(AtomicBool::new(false));
         self.generation += 1;
         self.query = Query::parse(&self.input.read(cx).value());
+        if self.query.mode != Mode::Monitor {
+            self.monitor_actions = None;
+        }
         self.set_monitor_sampling(
             self.visible && self.settings.is_none() && self.query.mode == Mode::Monitor,
         );
@@ -644,7 +655,8 @@ impl Launcher {
         } else if self.query.mode == Mode::Monitor {
             self.searching = false;
             self.results.clear();
-            self.status = "每秒更新 · CPU、内存、磁盘和应用排行".into();
+            self.status = "每秒更新 · CPU 按整机计 · 应用内存为驻留量，含共享页".into();
+            self.sync_monitor_selection();
         } else if self.query.mode == Mode::Uninstall {
             self.searching = false;
             let candidates: Vec<_> = self
@@ -1060,10 +1072,14 @@ impl Launcher {
             cx.notify();
             return;
         }
-        if self.uninstall_busy || self.power_busy {
+        if self.uninstall_busy || self.power_busy || self.monitor_actions.is_some() {
             self.visible = true;
             self.activation_generation = self.activation_generation.wrapping_add(1);
+            self.set_monitor_sampling(self.settings.is_none() && self.query.mode == Mode::Monitor);
             platform::show(window, cx);
+            if self.monitor_actions.is_some() {
+                window.focus(&self.dialog_focus, cx);
+            }
             return;
         }
         self.uninstall_confirmation = None;
@@ -1092,6 +1108,7 @@ impl Launcher {
                 && this.power_confirmation.is_none()
                 && !this.power_busy
                 && this.reminder_panel.is_none()
+                && this.monitor_actions.is_none()
                 && !this.has_uninstall_task()
             {
                 this.input.update(cx, |input, cx| input.focus(window, cx));
@@ -1127,6 +1144,10 @@ impl Launcher {
         }
         if self.query.mode == Mode::Clipboard {
             self.restore_clipboard(true, cx);
+            return;
+        }
+        if self.query.mode == Mode::Monitor {
+            self.open_monitor_actions(window, cx);
             return;
         }
         if self.query.mode == Mode::Uninstall {
@@ -1205,6 +1226,12 @@ impl Launcher {
     }
 
     fn reveal_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.query.mode == Mode::Monitor {
+            if self.monitor_actions.is_none() {
+                self.reveal_monitor_selected(window, cx);
+            }
+            return;
+        }
         if self.has_uninstall_task()
             || self.uninstall_confirmation.is_some()
             || self.power_confirmation.is_some()
@@ -1232,6 +1259,12 @@ impl Launcher {
     }
 
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
+        if self.query.mode == Mode::Monitor {
+            if self.monitor_actions.is_none() {
+                self.copy_monitor_selected(cx);
+            }
+            return;
+        }
         if self.has_uninstall_task()
             || self.uninstall_confirmation.is_some()
             || self.power_confirmation.is_some()
@@ -1297,6 +1330,10 @@ impl Launcher {
         if self.settings.is_some() || self.reminder_panel.is_some() {
             return;
         }
+        if self.monitor_actions.is_some() {
+            self.monitor_action_key_down(event, window, cx);
+            return;
+        }
         if let Some(power) = self.power_confirmation {
             if event.keystroke.key == "escape" && !self.power_busy {
                 self.power_confirmation = None;
@@ -1335,6 +1372,9 @@ impl Launcher {
             input.marked_text_range(window, cx).is_some()
         });
         if composing {
+            return;
+        }
+        if self.query.mode == Mode::Monitor && self.monitor_key_down(event, window, cx) {
             return;
         }
         match event.keystroke.key.as_str() {
@@ -1453,7 +1493,11 @@ impl Launcher {
         self.settings_subscription = None;
         self.set_monitor_sampling(self.visible && self.query.mode == Mode::Monitor);
         appearance::apply(self.config.theme, &self.config, window, cx);
-        self.input.update(cx, |input, cx| input.focus(window, cx));
+        if self.monitor_actions.is_some() {
+            window.focus(&self.dialog_focus, cx);
+        } else {
+            self.input.update(cx, |input, cx| input.focus(window, cx));
+        }
         cx.notify();
     }
 
