@@ -66,6 +66,7 @@ pub struct Launcher {
     history: History,
     clipboard_entries: Vec<clipboard::Entry>,
     clipboard_root: PathBuf,
+    clipboard_preview: Option<PathBuf>,
     clipboard_worker: async_channel::Sender<clipboard::Command>,
     clipboard_restore_pending: bool,
     clipboard_hide_after_restore: bool,
@@ -88,6 +89,8 @@ pub struct Launcher {
     reminder_feedback: Option<String>,
     notification_warning: Option<String>,
     monitor_snapshot: Option<Arc<monitor::Snapshot>>,
+    // Derived from the snapshot, query, and sort; reused across render passes.
+    monitor_ranked: Arc<[usize]>,
     monitor_worker: Option<std::sync::mpsc::Sender<bool>>,
     monitor_sampling: bool,
     monitor_sort: monitor::Sort,
@@ -342,6 +345,7 @@ impl Launcher {
             history,
             clipboard_entries: Vec::new(),
             clipboard_root,
+            clipboard_preview: None,
             clipboard_worker,
             clipboard_restore_pending: false,
             clipboard_hide_after_restore: false,
@@ -364,6 +368,7 @@ impl Launcher {
             reminder_feedback: None,
             notification_warning: None,
             monitor_snapshot: None,
+            monitor_ranked: Arc::from([]),
             monitor_worker: Some(monitor_worker),
             monitor_sampling: false,
             monitor_sort: monitor::Sort::default(),
@@ -535,6 +540,7 @@ impl Launcher {
         };
         self.update_cancelled = Arc::new(AtomicBool::new(false));
         let cancel = self.update_cancelled.clone();
+        let observe_cancel = cancel.clone();
         let (sender, receiver) = async_channel::unbounded();
         self.set_update_status(UpdateStatus::Connecting, cx);
         let job = cx.background_executor().spawn(async move {
@@ -543,7 +549,45 @@ impl Launcher {
             })
         });
         self.track_task(cx.spawn_in(window, async move |this, cx| {
-            while let Ok(status) = receiver.recv().await {
+            // Wait for progress normally. Poll only during phases where the
+            // UI exposes cancellation, so a stalled HTTP read stays asleep.
+            let mut can_cancel = false;
+            while !job.is_ready() {
+                if can_cancel {
+                    while let Ok(status) = receiver.try_recv() {
+                        can_cancel = status.can_cancel();
+                        if this
+                            .update_in(cx, |this, _, cx| this.set_update_status(status, cx))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if can_cancel && observe_cancel.load(Ordering::Relaxed) {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.set_update_status(UpdateStatus::Cancelled, cx)
+                        });
+                        return;
+                    }
+                    if can_cancel {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(50))
+                            .await;
+                    }
+                } else {
+                    let Ok(status) = receiver.recv().await else {
+                        break;
+                    };
+                    can_cancel = status.can_cancel();
+                    if this
+                        .update_in(cx, |this, _, cx| this.set_update_status(status, cx))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            while let Ok(status) = receiver.try_recv() {
                 if this
                     .update_in(cx, |this, _, cx| this.set_update_status(status, cx))
                     .is_err()
@@ -1330,6 +1374,15 @@ impl Launcher {
         if self.settings.is_some() || self.reminder_panel.is_some() {
             return;
         }
+        if self.clipboard_preview.is_some() {
+            if event.keystroke.key == "escape" {
+                self.clipboard_preview = None;
+                self.input.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.monitor_actions.is_some() {
             self.monitor_action_key_down(event, window, cx);
             return;
@@ -1716,6 +1769,11 @@ impl Launcher {
             .iter()
             .find(|e| e.id == candidate.id)
             .and_then(|e| e.thumbnail(&self.clipboard_root));
+        let image_preview = self
+            .clipboard_entries
+            .iter()
+            .find(|e| e.id == candidate.id)
+            .and_then(|e| e.image(&self.clipboard_root));
         let image = if candidate.path.as_os_str().is_empty() {
             None
         } else {
@@ -1829,7 +1887,20 @@ impl Launcher {
                             ),
                     )
                     .when(clipboard, |this| {
-                        this.child(
+                        this.when_some(image_preview, |this, path| {
+                            this.child(
+                                Button::new(("preview-clipboard", index))
+                                    .label("预览")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.clipboard_preview = Some(path.clone());
+                                        window.focus(&this.dialog_focus, cx);
+                                        cx.notify();
+                                    })),
+                            )
+                        })
+                        .child(
                             Button::new(("remove-clipboard", index))
                                 .label("删除")
                                 .ghost()
@@ -1918,6 +1989,67 @@ impl Render for Launcher {
                 .size_full()
                 .capture_key_down(cx.listener(Self::key_down))
                 .child(settings.clone())
+                .into_any_element();
+        }
+        if let Some(path) = self.clipboard_preview.clone() {
+            let theme = cx.theme();
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x000000d9))
+                .capture_key_down(cx.listener(Self::key_down))
+                .child(
+                    div()
+                        .w(px(900.))
+                        .h(px(640.))
+                        .max_w_full()
+                        .max_h_full()
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .w_full()
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .text_color(theme.foreground)
+                                        .child("图片预览"),
+                                )
+                                .child(
+                                    Button::new("close-clipboard-preview")
+                                        .label("关闭")
+                                        .ghost()
+                                        .small()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.clipboard_preview = None;
+                                            this.input
+                                                .update(cx, |input, cx| input.focus(window, cx));
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(img(path).size_full().object_fit(ObjectFit::Contain)),
+                        ),
+                )
                 .into_any_element();
         }
         if self.query.mode == Mode::Monitor {

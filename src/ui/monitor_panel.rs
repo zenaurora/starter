@@ -1,5 +1,5 @@
 use super::*;
-use gpui_kit::base::Disableable;
+use gpui_kit::base::{Disableable, FocusTrapElement};
 use starter::monitor::{Action, ProcessUsage, Sort, format_bytes};
 
 /// Hold the sampled target while the user chooses or confirms an action.
@@ -21,6 +21,7 @@ impl Launcher {
 
     pub(super) fn sync_monitor_selection(&mut self) {
         let Some(snapshot) = &self.monitor_snapshot else {
+            self.monitor_ranked = Arc::from([]);
             return;
         };
         let ranked = snapshot.ranked(&self.query.text, self.monitor_sort);
@@ -31,6 +32,7 @@ impl Launcher {
                 .first()
                 .map(|&index| snapshot.processes[index].id.clone());
         }
+        self.monitor_ranked = Arc::from(ranked);
     }
 
     fn selected_monitor_row(&self) -> Option<&ProcessUsage> {
@@ -57,8 +59,7 @@ impl Launcher {
             .monitor_snapshot
             .as_ref()
             .and_then(|snapshot| {
-                snapshot
-                    .ranked(&self.query.text, self.monitor_sort)
+                self.monitor_ranked
                     .iter()
                     .position(|&index| snapshot.processes[index].id == target.id)
             })
@@ -111,14 +112,13 @@ impl Launcher {
     }
 
     fn scroll_monitor_selection(&self) {
-        if let Some(snapshot) = &self.monitor_snapshot {
-            let ranked = snapshot.ranked(&self.query.text, self.monitor_sort);
-            if let Some(index) = ranked.iter().position(|&index| {
+        if let Some(snapshot) = &self.monitor_snapshot
+            && let Some(index) = self.monitor_ranked.iter().position(|&index| {
                 self.monitor_selected.as_deref() == Some(snapshot.processes[index].id.as_str())
-            }) {
-                self.monitor_scroll
-                    .scroll_to_item(index, ScrollStrategy::Nearest);
-            }
+            })
+        {
+            self.monitor_scroll
+                .scroll_to_item(index, ScrollStrategy::Nearest);
         }
     }
 
@@ -132,7 +132,7 @@ impl Launcher {
         match event.keystroke.key.as_str() {
             "up" | "down" if !modifiers.alt && !modifiers.control && !modifiers.platform => {
                 if let Some(snapshot) = &self.monitor_snapshot {
-                    let ranked = snapshot.ranked(&self.query.text, self.monitor_sort);
+                    let ranked = &self.monitor_ranked;
                     let index = ranked
                         .iter()
                         .position(|&index| {
@@ -203,10 +203,15 @@ impl Launcher {
             }
         }
         if !busy {
+            // Let the root focus-trap handler own Tab and Shift-Tab. It can
+            // wrap the menu without this component guessing at the global
+            // focus order.
+            if event.keystroke.key == "tab" {
+                return;
+            }
             let backwards = match event.keystroke.key.as_str() {
                 "up" => Some(true),
                 "down" => Some(false),
-                "tab" => Some(event.keystroke.modifiers.shift),
                 _ => None,
             };
             if let Some(backwards) = backwards {
@@ -238,8 +243,8 @@ impl Launcher {
         if self.dialog_focus.contains_focused(window, cx) {
             return;
         }
-        // The list remains mounted behind the menu. Wrap focus within its
-        // controls so Tab and arrows cannot activate a background row.
+        // The list remains mounted behind the menu. Wrap arrow navigation
+        // within its controls so it cannot activate a background row.
         window.focus(&self.dialog_focus, cx);
         window.focus_next(cx);
         if backwards {
@@ -499,7 +504,7 @@ impl Launcher {
             }
         }
         let menu = div()
-            .id("monitor-actions-menu")
+            .id("monitor-actions-content")
             .test_support()
             .w(px(300.))
             .p_1()
@@ -514,6 +519,7 @@ impl Launcher {
             .shadow_md()
             .occlude()
             .track_focus(&self.dialog_focus)
+            .focus_trap("monitor-actions-menu", &self.dialog_focus)
             .tab_group()
             .tab_stop(false)
             .on_mouse_down_out(cx.listener(|this, _, window, cx| {
@@ -648,7 +654,7 @@ impl Launcher {
                     theme.warning,
                     cx,
                 ));
-            let ranked = snapshot.ranked(&self.query.text, self.monitor_sort);
+            let ranked = self.monitor_ranked.clone();
             count = format!("{} 项", ranked.len());
             if snapshot.sampled_at.elapsed() > Duration::from_secs(3) {
                 count.push_str(" · 更新中…");
@@ -783,6 +789,7 @@ impl Launcher {
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.monitor_sort = sort;
+                                    this.sync_monitor_selection();
                                     this.scroll_monitor_selection();
                                     cx.notify();
                                 }))

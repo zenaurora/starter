@@ -2,8 +2,11 @@ use super::{Asset, Status, download, select_asset};
 use crate::config;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
+use std::io::Write;
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
@@ -53,7 +56,33 @@ fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 }
 
 #[cfg(target_os = "macos")]
-fn success(command: &mut Command) -> Result<()> {
+fn success(command: &mut Command, cancelled: &AtomicBool) -> Result<()> {
+    ensure!(
+        run_command(command, cancelled)?.success(),
+        "系统安装命令失败"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_command(command: &mut Command, cancelled: &AtomicBool) -> Result<std::process::ExitStatus> {
+    ensure!(!cancelled.load(Ordering::Relaxed), "下载已取消");
+    let mut child = command.spawn()?;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if cancelled.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("下载已取消");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn success_blocking(command: &mut Command) -> Result<()> {
     ensure!(command.status()?.success(), "系统安装命令失败");
     Ok(())
 }
@@ -65,7 +94,7 @@ pub(super) fn prepare_and_launch(
     progress: &mut impl FnMut(Status),
 ) -> Result<()> {
     let executable = std::env::current_exe()?.canonicalize()?;
-    let (mode, destination) = installation(&executable)?;
+    let (mode, destination) = installation(&executable, cancelled)?;
     let asset = select_asset(
         assets,
         version,
@@ -80,8 +109,14 @@ pub(super) fn prepare_and_launch(
     download(asset, &package, cancelled, progress)?;
     progress(Status::Preparing);
     ensure!(!cancelled.load(Ordering::Relaxed), "下载已取消");
-    let (payload, staging) =
-        prepare_payload(mode, &package, &destination, version, workspace.path())?;
+    let (payload, staging) = prepare_payload(
+        mode,
+        &package,
+        &destination,
+        version,
+        workspace.path(),
+        cancelled,
+    )?;
     ensure!(!cancelled.load(Ordering::Relaxed), "下载已取消");
     let backup = staging.as_ref().map_or_else(
         || destination.with_extension("starter-backup.exe"),
@@ -138,7 +173,7 @@ pub(super) fn prepare_and_launch(
     Ok(())
 }
 
-fn installation(executable: &Path) -> Result<(Mode, PathBuf)> {
+fn installation(executable: &Path, cancelled: &AtomicBool) -> Result<(Mode, PathBuf)> {
     #[cfg(target_os = "macos")]
     {
         let bundle = executable
@@ -151,13 +186,14 @@ fn installation(executable: &Path) -> Result<(Mode, PathBuf)> {
         );
         let plist = bundle.join("Contents/Info.plist");
         ensure!(
-            plist_value(&plist, "CFBundleIdentifier")? == "dev.starter.launcher",
+            plist_value(&plist, "CFBundleIdentifier", cancelled)? == "dev.starter.launcher",
             "当前应用标识不正确"
         );
         Ok((Mode::Bundle, bundle.to_owned()))
     }
     #[cfg(target_os = "windows")]
     {
+        let _ = cancelled;
         let installed = dirs::data_local_dir()
             .context("无法定位用户应用目录")?
             .join("Programs/Starter/Starter.exe");
@@ -175,7 +211,7 @@ fn installation(executable: &Path) -> Result<(Mode, PathBuf)> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = executable;
+        let _ = (executable, cancelled);
         anyhow::bail!("当前平台暂不支持自动安装");
     }
 }
@@ -186,6 +222,7 @@ fn prepare_payload(
     destination: &Path,
     version: &str,
     workspace: &Path,
+    cancelled: &AtomicBool,
 ) -> Result<(PathBuf, Option<tempfile::TempDir>)> {
     #[cfg(target_os = "macos")]
     {
@@ -196,26 +233,33 @@ fn prepare_payload(
             .context("无法写入应用所在目录；请把 Starter 移到可写的 Applications 目录后重试")?;
         let mount = workspace.join("mounted");
         fs::create_dir(&mount)?;
-        success(
+        let attached = success(
             command("/usr/bin/hdiutil")
                 .arg("attach")
                 .arg(package)
                 .args(["-readonly", "-nobrowse", "-mountpoint"])
                 .arg(&mount),
-        )
-        .context("无法挂载下载的安装包")?;
+            cancelled,
+        );
+        if let Err(error) = attached {
+            let _ = success_blocking(command("/usr/bin/hdiutil").arg("detach").arg(&mount));
+            return Err(error).context("无法挂载下载的安装包");
+        }
         let result = (|| {
             let source = mount.join("Starter.app");
             let payload = staging.path().join("Starter.app");
-            success(command("/usr/bin/ditto").arg(&source).arg(&payload))
-                .context("无法准备新应用")?;
+            success(
+                command("/usr/bin/ditto").arg(&source).arg(&payload),
+                cancelled,
+            )
+            .context("无法准备新应用")?;
             let plist = payload.join("Contents/Info.plist");
             ensure!(
-                plist_value(&plist, "CFBundleIdentifier")? == "dev.starter.launcher",
+                plist_value(&plist, "CFBundleIdentifier", cancelled)? == "dev.starter.launcher",
                 "下载应用的标识不正确"
             );
             ensure!(
-                plist_value(&plist, "CFBundleShortVersionString")? == version,
+                plist_value(&plist, "CFBundleShortVersionString", cancelled)? == version,
                 "下载应用的版本不一致"
             );
             ensure!(
@@ -226,11 +270,14 @@ fn prepare_payload(
                 command("/usr/bin/codesign")
                     .args(["--verify", "--deep", "--strict"])
                     .arg(&payload),
+                cancelled,
             )
             .context("下载应用的代码签名校验失败")?;
             Ok(payload)
         })();
-        let detached = success(command("/usr/bin/hdiutil").arg("detach").arg(&mount));
+        // Detaching is cleanup: run it even when cancellation was requested,
+        // otherwise a cancelled preparation could leave the DMG mounted.
+        let detached = success_blocking(command("/usr/bin/hdiutil").arg("detach").arg(&mount));
         let payload = result?;
         detached.context("无法卸载安装包，请稍后重试")?;
         Ok((payload, Some(staging)))
@@ -257,9 +304,10 @@ fn prepare_payload(
             .context("应用目录不可写")?;
         let payload = staging.path().join("Starter.exe");
         let mut output = fs::File::create(&payload)?;
-        std::io::copy(
+        copy_cancelled(
             &mut std::io::Read::take(&mut executable, super::MAX_DOWNLOAD + 1),
             &mut output,
+            cancelled,
         )?;
         output.sync_all()?;
         let _ = workspace;
@@ -267,20 +315,56 @@ fn prepare_payload(
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = (mode, package, destination, version, workspace);
+        let _ = (mode, package, destination, version, workspace, cancelled);
         anyhow::bail!("当前平台暂不支持自动安装");
     }
 }
 
 #[cfg(target_os = "macos")]
-fn plist_value(plist: &Path, key: &str) -> Result<String> {
-    let output = Command::new("/usr/libexec/PlistBuddy")
+fn plist_value(plist: &Path, key: &str, cancelled: &AtomicBool) -> Result<String> {
+    let mut command = Command::new("/usr/libexec/PlistBuddy");
+    command
         .arg("-c")
         .arg(format!("Print :{key}"))
         .arg(plist)
-        .output()?;
-    ensure!(output.status.success(), "应用缺少 {key}");
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut stdout = String::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                pipe.read_to_string(&mut stdout)?;
+            }
+            ensure!(status.success(), "应用缺少 {key}");
+            return Ok(stdout.trim().to_string());
+        }
+        if cancelled.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("下载已取消");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn copy_cancelled(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    cancelled: &AtomicBool,
+) -> Result<u64> {
+    let mut buffer = [0; 64 * 1024];
+    let mut copied = 0;
+    loop {
+        ensure!(!cancelled.load(Ordering::Relaxed), "下载已取消");
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(copied);
+        }
+        writer.write_all(&buffer[..count])?;
+        copied += count as u64;
+    }
 }
 
 /// Invoked before GPUI initializes, so the helper holds no window or tray.
@@ -470,7 +554,7 @@ fn launch(destination: &Path, health: Option<&Path>) -> Result<Option<std::proce
         if let Some(health) = health {
             open.arg("--args").arg("--update-health").arg(health);
         }
-        success(&mut open)?;
+        success_blocking(&mut open)?;
         Ok(None)
     }
     #[cfg(not(target_os = "macos"))]
@@ -522,6 +606,23 @@ mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
     #[test]
+    fn cancellable_install_command_is_stopped_before_it_finishes() {
+        let cancelled = AtomicBool::new(false);
+        let setter = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(100));
+                cancelled.store(true, Ordering::Relaxed);
+            });
+            let started = Instant::now();
+            let result = success(command("/bin/sleep").arg("5"), &cancelled);
+            (result, started.elapsed())
+        });
+        assert!(setter.0.is_err());
+        assert!(setter.1 < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn prepares_a_signed_dmg_and_rejects_wrong_bundle_version() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("image/Starter.app");
@@ -545,6 +646,7 @@ mod tests {
             command("/usr/bin/codesign")
                 .args(["--force", "--deep", "--sign", "-"])
                 .arg(&source),
+            &AtomicBool::new(false),
         )
         .unwrap();
         let package = dir.path().join("fixture.dmg");
@@ -553,6 +655,7 @@ mod tests {
                 .args(["create", "-format", "UDZO", "-srcfolder"])
                 .arg(dir.path().join("image"))
                 .arg(&package),
+            &AtomicBool::new(false),
         )
         .unwrap();
         let destination = dir.path().join("Starter.app");
@@ -566,6 +669,7 @@ mod tests {
                 &destination,
                 version,
                 workspace.path(),
+                &AtomicBool::new(false),
             );
             if version == "0.4.0" {
                 assert!(result.unwrap().0.join("Contents/MacOS/starter").is_file());
@@ -599,8 +703,15 @@ mod tests {
         archive.finish().unwrap();
         let destination = dir.path().join("Starter.exe");
         fs::write(&destination, b"old").unwrap();
-        let (payload, _stage) =
-            prepare_payload(Mode::Portable, &package, &destination, "0.4.0", dir.path()).unwrap();
+        let (payload, _stage) = prepare_payload(
+            Mode::Portable,
+            &package,
+            &destination,
+            "0.4.0",
+            dir.path(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert_eq!(fs::read(&payload).unwrap(), b"new executable");
         assert_eq!(fs::read(&destination).unwrap(), b"old");
         assert!(!dir.path().join("escape.txt").exists());

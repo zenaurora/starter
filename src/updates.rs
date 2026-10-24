@@ -57,10 +57,9 @@ impl Status {
     }
 
     pub fn can_cancel(&self) -> bool {
-        matches!(
-            self,
-            Self::Connecting | Self::Downloading { .. } | Self::Verifying { .. } | Self::Preparing
-        )
+        // ureq's synchronous connect/body read cannot be interrupted by the
+        // cancellation flag. Only expose Cancel where the worker polls it.
+        matches!(self, Self::Verifying { .. } | Self::Preparing)
     }
 
     pub fn progress(&self) -> Option<f32> {
@@ -262,6 +261,7 @@ fn download(
     cancelled: &AtomicBool,
     progress: &mut impl FnMut(Status),
 ) -> Result<()> {
+    ensure!(!cancelled.load(Ordering::Relaxed), "下载已取消");
     progress(Status::Connecting);
     let mut response = agent(300)
         .get(&asset.browser_download_url)
@@ -371,6 +371,20 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn cancellation_is_off_for_non_interruptible_http_phases() {
+        assert!(!Status::Connecting.can_cancel());
+        assert!(
+            !Status::Downloading {
+                received: 0,
+                total: 1,
+            }
+            .can_cancel()
+        );
+        assert!(Status::Verifying { total: 1 }.can_cancel());
+        assert!(Status::Preparing.can_cancel());
     }
 
     #[test]

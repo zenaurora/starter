@@ -30,39 +30,71 @@ impl Action {
 /// already exited. A normal quit can display a save dialog or be cancelled.
 pub fn perform(action: Action, row: &ProcessUsage) -> Result<String> {
     protect_target(row)?;
-    let pids: Vec<_> = row.members.iter().map(|p| Pid::from_u32(p.pid)).collect();
     let mut system = System::new();
-    // Start time is collected by sysinfo independently of refresh flags. Avoid
-    // CPU/memory sampling and force a fresh image path for this action only.
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&pids),
-        ProcessRefreshKind::new().with_exe(UpdateKind::Always),
-    );
-    let mut verified = Vec::new();
     let mut skipped = 0;
-    for expected in &row.members {
-        let current = system.process(Pid::from_u32(expected.pid));
-        if current.is_some_and(|current| {
-            matches_identity(row, expected, current.start_time(), current.exe())
-        }) {
-            verified.push(expected);
-        } else {
-            skipped += 1;
-        }
-    }
-    if verified.is_empty() {
-        bail!("所选进程已退出或身份已变化，请等待监控刷新后重试");
-    }
     let mut report = Report::default();
     match action {
-        Action::Quit => quit(row, &verified, &mut report)?,
+        Action::Quit => {
+            let pids: Vec<_> = row.members.iter().map(|p| Pid::from_u32(p.pid)).collect();
+            // Start time is collected by sysinfo independently of refresh flags. Avoid
+            // CPU/memory sampling and force a fresh image path for this action only.
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&pids),
+                ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+            );
+            let mut verified = Vec::new();
+            for expected in &row.members {
+                let current = system.process(Pid::from_u32(expected.pid));
+                if current.is_some_and(|current| {
+                    matches_identity(row, expected, current.start_time(), current.exe())
+                }) {
+                    verified.push(expected);
+                } else {
+                    skipped += 1;
+                }
+            }
+            if verified.is_empty() {
+                bail!("所选进程已退出或身份已变化，请等待监控刷新后重试");
+            }
+            quit(row, &verified, &mut report)?;
+        }
         Action::Terminate | Action::ForceQuit => {
-            for process in verified {
+            for process in &row.members {
+                // Refresh and verify immediately before each signal. A batch
+                // refresh would both delay the first request and leave a PID
+                // reuse window between verification and signalling.
+                if verify_before_signal(row, process, &mut system).is_err() {
+                    skipped += 1;
+                    continue;
+                }
                 report.record(process.pid, signal(action, process));
             }
         }
     }
+    if report.sent.is_empty() && report.errors.is_empty() {
+        bail!("所选进程已退出或身份已变化，请等待监控刷新后重试");
+    }
     report.message(action, &row.name, skipped)
+}
+
+fn verify_before_signal(
+    row: &ProcessUsage,
+    expected: &ProcessIdentity,
+    system: &mut System,
+) -> Result<()> {
+    let pid = Pid::from_u32(expected.pid);
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+    );
+    let Some(current) = system.process(pid) else {
+        bail!("进程已退出或身份已变化");
+    };
+    if matches_identity(row, expected, current.start_time(), current.exe()) {
+        Ok(())
+    } else {
+        bail!("进程身份已变化")
+    }
 }
 
 fn group_path(exe: &Path) -> PathBuf {

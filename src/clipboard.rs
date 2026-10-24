@@ -83,6 +83,13 @@ impl Entry {
         self.thumbnail.as_ref().map(|file| root.join(file))
     }
 
+    pub fn image(&self, root: &Path) -> Option<PathBuf> {
+        match &self.payload {
+            Payload::Image { file, .. } => Some(root.join(file)),
+            _ => None,
+        }
+    }
+
     fn index(&mut self) {
         let text = match &self.payload {
             Payload::Text(text) => text.to_lowercase(),
@@ -557,6 +564,9 @@ mod tests {
             assert_eq!(store.restore(&hits[0].id).unwrap(), *item);
         }
         assert!(store.entries[1].thumbnail(&root).unwrap().exists());
+        let image = store.entries[1].image(&root).unwrap();
+        assert!(image.exists());
+        assert_ne!(image, store.entries[1].thumbnail(&root).unwrap());
         fs::remove_file(file).unwrap();
         assert!(store.restore(&store.entries[0].id).is_err());
     }

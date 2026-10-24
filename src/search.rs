@@ -410,25 +410,6 @@ fn score_name(
             let distance = strsim::damerau_levenshtein(query, target);
             (distance <= tolerance).then(|| 10_000 - distance as u32 * 1_000)
         })
-    // .map(|word| {
-    //     if word.starts_with(query) {
-    //         return 0;
-    //     }
-    //     // 字符边界截取前缀，避免 UTF-8 切片错误
-    //     let target = if word.chars().count() > length + tolerance {
-    //         let end = word
-    //             .char_indices()
-    //             .nth(length)
-    //             .map_or(word.len(), |(i, _)| i);
-    //         &word[..end]
-    //     } else {
-    //         word
-    //     };
-
-    //     strsim::damerau_levenshtein(query, target)
-    // })
-    // .min()?;
-    // (distance <= tolerance as u32).then(|| 10_000 - distance as u32 * 1_000)
 }
 
 #[derive(Default)]

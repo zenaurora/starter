@@ -4,7 +4,7 @@ Starter 是一个使用 Rust 和 GPU 原生渲染的桌面启动器。它常驻�
 
 **macOS** `Option+Space` · **Windows** `Ctrl+Space`
 
-[Starter 0.6.2 release notes](docs/releases/0.6.2.md)
+[Starter 0.6.3 release notes](docs/releases/0.6.3.md)
 
 ## 功能
 

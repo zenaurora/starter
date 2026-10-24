@@ -52,6 +52,7 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         catalog: Catalog::default(),
                         clipboard_entries: vec![],
                         clipboard_root: std::env::temp_dir().join("starter-ui-test-clipboard"),
+                        clipboard_preview: None,
                         clipboard_worker,
                         clipboard_restore_pending: false,
                         clipboard_hide_after_restore: false,
@@ -74,6 +75,7 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         reminder_feedback: None,
                         notification_warning: None,
                         monitor_snapshot: None,
+                        monitor_ranked: Arc::from([]),
                         monitor_worker: None,
                         monitor_sampling: false,
                         monitor_sort: monitor::Sort::default(),
@@ -1038,7 +1040,8 @@ fn monitor_actions_support_keyboard_focus_navigation_and_activation(cx: &mut Tes
                     .try_find(id)
                     .is_some_and(|button| button.focused() == Some(true))),
                 "Tab escaped the monitor action menu at {iteration}: {:?}; container={}",
-                menu_buttons.map(|id| (id, window.try_find(id).and_then(|button| button.focused()))),
+                menu_buttons
+                    .map(|id| (id, window.try_find(id).and_then(|button| button.focused()))),
                 launcher.read(cx).dialog_focus.is_focused(window)
             );
         }
