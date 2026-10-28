@@ -87,6 +87,7 @@ pub enum Action {
     Settings(Setting),
     Reminders,
     Monitor,
+    SoftwareUpdates,
 }
 
 struct Command {
@@ -98,6 +99,22 @@ struct Command {
 }
 
 const COMMANDS: &[Command] = &[
+    Command {
+        id: "software-updates",
+        title: "软件更新",
+        detail: "查看安装来源和软件版本，选择项目并确认更新计划",
+        aliases: &[
+            "update",
+            "updates",
+            "/update",
+            "upgrade",
+            "brew",
+            "软件更新",
+            "本机更新",
+            "更新软件",
+        ],
+        action: Action::SoftwareUpdates,
+    },
     Command {
         id: "lock",
         title: "锁屏",
@@ -237,7 +254,7 @@ pub fn candidates() -> &'static [Candidate] {
                     Action::Settings(_) => Kind::SystemSetting,
                     Action::Reminders => Kind::ReminderDraft,
                     Action::Monitor => Kind::Monitor,
-                    Action::Power(_) => Kind::SystemCommand,
+                    Action::Power(_) | Action::SoftwareUpdates => Kind::SystemCommand,
                 },
             })
             .collect()

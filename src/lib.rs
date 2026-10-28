@@ -7,6 +7,8 @@ pub mod monitor;
 pub mod opening;
 pub mod reminders;
 pub mod search;
+#[cfg(target_os = "macos")]
+pub mod software_updates;
 pub mod startup;
 pub mod system_commands;
 #[cfg(target_os = "macos")]

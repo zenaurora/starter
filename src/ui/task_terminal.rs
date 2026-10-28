@@ -726,6 +726,7 @@ mod tests {
         use std::time::{Duration, Instant};
         let (session, events) = Session::start(
             Request {
+                env: vec![],
                 program: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),

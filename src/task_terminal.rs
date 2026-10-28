@@ -24,6 +24,7 @@ pub use portable_pty::PtySize as Size;
 pub struct Request {
     pub program: PathBuf,
     pub args: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
 }
 
 impl Request {
@@ -46,6 +47,9 @@ impl Request {
         command.env("HOMEBREW_NO_AUTO_UPDATE", "1");
         command.env("HOMEBREW_NO_ANALYTICS", "1");
         command.env("MOLE_DELETE_MODE", "trash");
+        for (key, value) in &self.env {
+            command.env(key, value);
+        }
         Ok(command)
     }
 }
@@ -406,6 +410,7 @@ mod tests {
         Request {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), script.into()],
+            env: vec![],
         }
     }
 

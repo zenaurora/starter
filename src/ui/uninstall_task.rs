@@ -209,6 +209,7 @@ impl TaskPanel {
             task_terminal::Request {
                 program: "/bin/sleep".into(),
                 args: vec!["30".into()],
+                env: vec![],
             },
             Size::default(),
         )

@@ -40,6 +40,12 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         input,
                         settings: None,
                         settings_subscription: None,
+                        #[cfg(target_os = "macos")]
+                        software_panel: None,
+                        #[cfg(target_os = "macos")]
+                        software_inventory: Default::default(),
+                        #[cfg(target_os = "macos")]
+                        software_subscription: None,
                         error_dialog: None,
                         error_dialog_subscription: None,
                         icons: Icons::new().0,

@@ -1776,6 +1776,9 @@ mod ui {
     #[path = "reminder_panel.rs"]
     mod reminder_panel;
     #[cfg(target_os = "macos")]
+    #[path = "software_panel.rs"]
+    mod software_panel;
+    #[cfg(target_os = "macos")]
     #[path = "task_terminal.rs"]
     mod task_terminal;
     #[cfg(test)]
@@ -1830,6 +1833,12 @@ mod ui {
         input: Entity<InputState>,
         settings: Option<Entity<Settings>>,
         settings_subscription: Option<Subscription>,
+        #[cfg(target_os = "macos")]
+        software_panel: Option<Entity<software_panel::SoftwarePanel>>,
+        #[cfg(target_os = "macos")]
+        software_inventory: std::sync::Arc<starter::software_updates::Inventory>,
+        #[cfg(target_os = "macos")]
+        software_subscription: Option<Subscription>,
         error_dialog: Option<Entity<ErrorDialog>>,
         error_dialog_subscription: Option<Subscription>,
         icons: Icons,
@@ -2116,6 +2125,12 @@ mod ui {
                 input,
                 settings: None,
                 settings_subscription: None,
+                #[cfg(target_os = "macos")]
+                software_panel: None,
+                #[cfg(target_os = "macos")]
+                software_inventory: Default::default(),
+                #[cfg(target_os = "macos")]
+                software_subscription: None,
                 error_dialog,
                 error_dialog_subscription,
                 icons,
@@ -2986,6 +3001,10 @@ mod ui {
                     },
                     BuiltinAction::Reminders => self.open_reminders("", window, cx),
                     BuiltinAction::Monitor => self.open_monitor(window, cx),
+                    BuiltinAction::SoftwareUpdates => {
+                        self.status = "请在 Starter 主程序中打开软件更新".into();
+                        cx.notify();
+                    }
                 }
                 return;
             }
@@ -4030,6 +4049,12 @@ mod ui {
                 input,
                 settings: None,
                 settings_subscription: None,
+                #[cfg(target_os = "macos")]
+                software_panel: None,
+                #[cfg(target_os = "macos")]
+                software_inventory: Default::default(),
+                #[cfg(target_os = "macos")]
+                software_subscription: None,
                 error_dialog: None,
                 error_dialog_subscription: None,
                 icons: Icons::new().0,

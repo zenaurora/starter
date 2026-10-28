@@ -66,6 +66,7 @@ pub fn prepare(target: &Target, cancelled: &AtomicBool) -> Result<Prepared> {
         request: Request {
             program,
             args: vec!["uninstall".into(), argument.into()],
+            env: vec![],
         },
         detail,
     })

@@ -3,6 +3,8 @@ mod launcher_commands;
 mod monitor_panel;
 mod reminder_panel;
 #[cfg(target_os = "macos")]
+mod software_panel;
+#[cfg(target_os = "macos")]
 mod task_terminal;
 #[cfg(test)]
 mod tests;
@@ -54,6 +56,12 @@ pub struct Launcher {
     input: Entity<InputState>,
     settings: Option<Entity<Settings>>,
     settings_subscription: Option<Subscription>,
+    #[cfg(target_os = "macos")]
+    software_panel: Option<Entity<software_panel::SoftwarePanel>>,
+    #[cfg(target_os = "macos")]
+    software_inventory: std::sync::Arc<starter::software_updates::Inventory>,
+    #[cfg(target_os = "macos")]
+    software_subscription: Option<Subscription>,
     error_dialog: Option<Entity<ErrorDialog>>,
     error_dialog_subscription: Option<Subscription>,
     icons: Icons,
@@ -232,6 +240,10 @@ impl Launcher {
                     if this
                         .update_in(cx, |this, _, cx| {
                             this.icons.insert(icon);
+                            #[cfg(target_os = "macos")]
+                            if let Some(panel) = &this.software_panel {
+                                panel.update(cx, |_, cx| cx.notify());
+                            }
                             cx.notify();
                         })
                         .is_err()
@@ -336,6 +348,12 @@ impl Launcher {
             input,
             settings: None,
             settings_subscription: None,
+            #[cfg(target_os = "macos")]
+            software_panel: None,
+            #[cfg(target_os = "macos")]
+            software_inventory: Default::default(),
+            #[cfg(target_os = "macos")]
+            software_subscription: None,
             error_dialog,
             error_dialog_subscription,
             icons,
@@ -449,6 +467,13 @@ impl Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.software_panel {
+            if active && self.visible {
+                panel.update(cx, |panel, cx| panel.focus(window, cx));
+            }
+            return;
+        }
         #[cfg(target_os = "macos")]
         if let Some(task) = &self.uninstall_task {
             // 内嵌卸载任务面板单独管理焦点，不走下面普通搜索界面的失活隐藏流程。
@@ -1083,6 +1108,10 @@ impl Launcher {
             }
             ShellEvent::OpenReminders => {
                 self.show(window, cx);
+                #[cfg(target_os = "macos")]
+                if self.software_panel.is_some() {
+                    return;
+                }
                 self.open_reminders("", window, cx);
             }
             ShellEvent::OpenSystem => {
@@ -1100,6 +1129,15 @@ impl Launcher {
     }
 
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.software_panel {
+            self.visible = true;
+            self.activation_generation = self.activation_generation.wrapping_add(1);
+            platform::show(window, cx);
+            panel.update(cx, |panel, cx| panel.focus(window, cx));
+            cx.notify();
+            return;
+        }
         #[cfg(target_os = "macos")]
         if let Some(task) = &self.uninstall_task {
             self.visible = true;
@@ -1241,6 +1279,7 @@ impl Launcher {
                 },
                 BuiltinAction::Reminders => self.open_reminders("", window, cx),
                 BuiltinAction::Monitor => self.open_monitor(window, cx),
+                BuiltinAction::SoftwareUpdates => self.open_software_updates(window, cx),
             }
             return;
         }
@@ -1364,6 +1403,10 @@ impl Launcher {
             return;
         }
         #[cfg(target_os = "macos")]
+        if self.software_panel.is_some() {
+            return;
+        }
+        #[cfg(target_os = "macos")]
         if let Some(task) = &self.uninstall_task {
             if event.keystroke.key == "escape" && task.read(cx).can_close() {
                 self.close_uninstall_task(window, cx);
@@ -1473,6 +1516,11 @@ impl Launcher {
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if self.software_panel.is_some() {
+            self.show(window, cx);
+            return;
+        }
         if self.has_uninstall_task() {
             self.show(window, cx);
             return;
@@ -1539,6 +1587,46 @@ impl Launcher {
             input.focus(window, cx);
         });
         self.search(cx);
+    }
+
+    fn open_software_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.has_uninstall_task()
+                || self.uninstall_busy
+                || self.power_busy
+                || self.software_panel.is_some()
+            {
+                return;
+            }
+            self.set_monitor_sampling(false);
+            self.activation_generation = self.activation_generation.wrapping_add(1);
+            let panel = cx.new(|cx| {
+                software_panel::SoftwarePanel::new(
+                    self.config.theme,
+                    self.software_inventory.clone(),
+                    self.catalog.apps.clone(),
+                    self.icons.clone(),
+                    window,
+                    cx,
+                )
+            });
+            self.software_subscription =
+                Some(cx.subscribe_in(&panel, window, |this, _, _, window, cx| {
+                    this.software_panel = None;
+                    this.software_subscription = None;
+                    this.refresh_apps();
+                    this.input.update(cx, |input, cx| input.focus(window, cx));
+                    cx.notify();
+                }));
+            self.software_panel = Some(panel);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window;
+            self.status = "本机软件更新目前支持 macOS".into();
+        }
+        cx.notify();
     }
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1957,6 +2045,14 @@ impl Drop for Launcher {
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.software_panel {
+            return div()
+                .size_full()
+                .capture_key_down(cx.listener(Self::key_down))
+                .child(panel.clone())
+                .into_any_element();
+        }
+        #[cfg(target_os = "macos")]
         if let Some(task) = &self.uninstall_task {
             return div()
                 .size_full()
@@ -2151,6 +2247,15 @@ impl Render for Launcher {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.input.update(cx, |input, cx| input.focus(window, cx));
                                         cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("software-updates")
+                                    .label("软件更新")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_software_updates(window, cx)
                                     })),
                             )
                             .child(
