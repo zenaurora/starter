@@ -194,24 +194,30 @@ impl Workbench {
             _subscriptions: subscriptions,
             _worker_task: None,
         };
-        match organizer::start(path) {
-            Ok((worker, events)) => {
-                this.worker = Some(worker);
-                this._worker_task = Some(cx.spawn_in(window, async move |this, cx| {
-                    while let Ok(event) = events.recv().await {
-                        if this
-                            .update_in(cx, |this, window, cx| this.received(event, window, cx))
-                            .is_err()
-                        {
-                            break;
+        if cx.background_executor().is_test() {
+            // Tests inject storage commands and events; OS threads must not wake
+            // GPUI's deterministic scheduler.
+            this.loaded = true;
+        } else {
+            match organizer::start(path) {
+                Ok((worker, events)) => {
+                    this.worker = Some(worker);
+                    this._worker_task = Some(cx.spawn_in(window, async move |this, cx| {
+                        while let Ok(event) = events.recv().await {
+                            if this
+                                .update_in(cx, |this, window, cx| this.received(event, window, cx))
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
-                    }
-                }));
-            }
-            Err(e) => {
-                this.loaded = true;
-                this.load_error = true;
-                this.message = format!("无法启动本地存储：{e:#}");
+                    }));
+                }
+                Err(e) => {
+                    this.loaded = true;
+                    this.load_error = true;
+                    this.message = format!("无法启动本地存储：{e:#}");
+                }
             }
         }
         this.activate(section, window, cx);
@@ -1849,10 +1855,11 @@ mod tests {
                                 window,
                                 cx,
                             );
-                            // Deterministic UI fixtures never depend on worker scheduling.
-                            panel.worker = None;
-                            panel._worker_task = None;
-                            panel.loaded = true;
+                            // A real storage thread can wake GPUI's test scheduler from
+                            // outside its deterministic executor, even before teardown.
+                            assert!(panel.worker.is_none());
+                            assert!(panel._worker_task.is_none());
+                            assert!(panel.loaded);
                             let mut data = Data::default();
                             data.entries = (1..40).map(|id| entry(id, Kind::Text)).collect();
                             data.entries[38].title = "很长的发票抬头与账号名称".repeat(12);
