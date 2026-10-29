@@ -10,6 +10,7 @@ mod task_terminal;
 mod tests;
 #[cfg(target_os = "macos")]
 mod uninstall_task;
+mod workbench;
 
 use crate::{
     appearance,
@@ -56,6 +57,9 @@ pub struct Launcher {
     input: Entity<InputState>,
     settings: Option<Entity<Settings>>,
     settings_subscription: Option<Subscription>,
+    workbench: Option<Entity<workbench::Workbench>>,
+    workbench_open: bool,
+    workbench_subscription: Option<Subscription>,
     #[cfg(target_os = "macos")]
     software_panel: Option<Entity<software_panel::SoftwarePanel>>,
     #[cfg(target_os = "macos")]
@@ -162,7 +166,7 @@ impl Launcher {
             History::empty(history_path)
         });
         let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("搜索应用、系统命令或设置；/remind 10m 开会")
+            InputState::new(window, cx).placeholder("搜索应用或功能；输入 / 查看全部命令")
         });
         input.update(cx, |state, cx| state.focus(window, cx));
         let input_focus = input.focus_handle(cx);
@@ -348,6 +352,9 @@ impl Launcher {
             input,
             settings: None,
             settings_subscription: None,
+            workbench: None,
+            workbench_open: false,
+            workbench_subscription: None,
             #[cfg(target_os = "macos")]
             software_panel: None,
             #[cfg(target_os = "macos")]
@@ -467,6 +474,15 @@ impl Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workbench_open {
+            if active
+                && self.visible
+                && let Some(panel) = &self.workbench
+            {
+                panel.update(cx, |panel, cx| panel.focus(window, cx));
+            }
+            return;
+        }
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.software_panel {
             if active && self.visible {
@@ -530,6 +546,7 @@ impl Launcher {
         // 设置页、错误框、卸载确认、电源确认/操作、提醒面板等需要保留的交互。
         // 内嵌卸载任务面板已在 handle_activation_change() 开头单独处理。
         !active
+            && !self.workbench_open
             && self.visible
             && shell_ready
             && self.settings.is_none()
@@ -673,86 +690,6 @@ impl Launcher {
             generation: self.catalog_generation,
         });
         self.search(cx);
-    }
-
-    fn search(&mut self, cx: &mut Context<Self>) {
-        self.cancelled.store(true, Ordering::Relaxed);
-        self.cancelled = Arc::new(AtomicBool::new(false));
-        self.generation += 1;
-        self.query = Query::parse(&self.input.read(cx).value());
-        if self.query.mode != Mode::Monitor {
-            self.monitor_actions = None;
-        }
-        self.set_monitor_sampling(
-            self.visible && self.settings.is_none() && self.query.mode == Mode::Monitor,
-        );
-        self.selected = 0;
-        self.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
-        if self.query.mode == Mode::Apps {
-            self.searching = false;
-            let commands = if self.query.text.is_empty() {
-                &[][..]
-            } else {
-                system_commands::candidates()
-            };
-            self.results = search::rank_apps(
-                self.candidates.iter().chain(commands),
-                &self.query.text,
-                &self.history.entries,
-                &self.config.favorites,
-            );
-            self.status = format!(
-                "{} 个应用{}",
-                self.catalog.apps.len(),
-                if self.catalog.warnings.is_empty() {
-                    String::new()
-                } else {
-                    format!("，{} 处目录未能读取", self.catalog.warnings.len())
-                }
-            );
-        } else if self.query.mode == Mode::System {
-            self.searching = false;
-            self.results = search::rank(
-                system_commands::candidates(),
-                &self.query.text,
-                &Default::default(),
-            );
-            self.status = "输入英文或中文查找 · 重启和关机需确认".into();
-        } else if self.query.mode == Mode::Reminders {
-            self.searching = false;
-            self.reminder_results();
-        } else if self.query.mode == Mode::Monitor {
-            self.searching = false;
-            self.results.clear();
-            self.status = "每秒更新 · CPU 按整机计 · 应用内存为驻留量，含共享页".into();
-            self.sync_monitor_selection();
-        } else if self.query.mode == Mode::Uninstall {
-            self.searching = false;
-            let candidates: Vec<_> = self
-                .uninstall_targets
-                .iter()
-                .map(|target| target.candidate(&self.config))
-                .collect();
-            self.results = search::rank(&candidates, &self.query.text, &Default::default());
-            self.status = format!(
-                "{} 个可卸载应用 · 系统应用与 Starter 已排除",
-                self.uninstall_targets.len()
-            );
-        } else if self.query.mode == Mode::Clipboard {
-            self.searching = false;
-            self.clipboard_results();
-        } else {
-            self.results.clear();
-            self.searching = true;
-            self.status = "搜索中…".into();
-            let _ = self.worker.try_send(worker::Command::Search {
-                generation: self.generation,
-                query: self.query.clone(),
-                roots: self.config.search_roots.clone(),
-                cancelled: self.cancelled.clone(),
-            });
-        }
-        cx.notify();
     }
 
     fn worker_event(&mut self, event: worker::Event, cx: &mut Context<Self>) {
@@ -1129,6 +1066,16 @@ impl Launcher {
     }
 
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workbench_open {
+            self.visible = true;
+            self.activation_generation = self.activation_generation.wrapping_add(1);
+            platform::show(window, cx);
+            if let Some(panel) = &self.workbench {
+                panel.update(cx, |panel, cx| panel.focus(window, cx));
+            }
+            cx.notify();
+            return;
+        }
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.software_panel {
             self.visible = true;
@@ -1278,8 +1225,13 @@ impl Launcher {
                     }
                 },
                 BuiltinAction::Reminders => self.open_reminders("", window, cx),
+                BuiltinAction::Search(mode) => self.select_mode(mode, window, cx),
+                BuiltinAction::Preferences => self.open_settings(window, cx),
                 BuiltinAction::Monitor => self.open_monitor(window, cx),
                 BuiltinAction::SoftwareUpdates => self.open_software_updates(window, cx),
+                BuiltinAction::Saved => self.open_workbench(workbench::Section::Saved, window, cx),
+                BuiltinAction::Todos => self.open_workbench(workbench::Section::Todos, window, cx),
+                BuiltinAction::Ports => self.open_workbench(workbench::Section::Ports, window, cx),
             }
             return;
         }
@@ -1414,7 +1366,7 @@ impl Launcher {
             }
             return;
         }
-        if self.settings.is_some() || self.reminder_panel.is_some() {
+        if self.settings.is_some() || self.reminder_panel.is_some() || self.workbench_open {
             return;
         }
         if self.clipboard_preview.is_some() {
@@ -1852,22 +1804,19 @@ impl Launcher {
             Kind::Reminder | Kind::ReminderDraft => IconName::Clock,
             Kind::Monitor => IconName::Activity,
         };
-        let thumbnail = self
-            .clipboard_entries
-            .iter()
-            .find(|e| e.id == candidate.id)
-            .and_then(|e| e.thumbnail(&self.clipboard_root));
-        let image_preview = self
-            .clipboard_entries
-            .iter()
-            .find(|e| e.id == candidate.id)
-            .and_then(|e| e.image(&self.clipboard_root));
+        let clipboard = self.query.mode == Mode::Clipboard;
+        let entry = if clipboard {
+            self.clipboard_entries.iter().find(|e| e.id == candidate.id)
+        } else {
+            None
+        };
+        let thumbnail = entry.and_then(|e| e.thumbnail(&self.clipboard_root));
+        let image_preview = entry.and_then(|e| e.image(&self.clipboard_root));
         let image = if candidate.path.as_os_str().is_empty() {
             None
         } else {
             self.icons.get(&candidate.path)
         };
-        let clipboard = self.query.mode == Mode::Clipboard;
         let clipboard_id = candidate.id.clone();
         let home = dirs::home_dir()
             .map(|p| p.display().to_string())
@@ -1908,6 +1857,7 @@ impl Launcher {
             .child(
                 div()
                     .id(("result", index))
+                    .test_support()
                     .w_full()
                     .h_full()
                     .px_3()
@@ -1958,6 +1908,25 @@ impl Launcher {
                                             .text_ellipsis()
                                             .child(detail),
                                     ),
+                            )
+                            .when_some(
+                                system_commands::shortcut(&candidate.id),
+                                |this, shortcut| {
+                                    this.child(
+                                        div()
+                                            .id(("command-shortcut", index))
+                                            .test_support()
+                                            .flex_shrink_0()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(theme.secondary)
+                                            .text_size(px(11.))
+                                            .font_family(theme.mono_font_family.clone())
+                                            .text_color(theme.muted_foreground)
+                                            .child(shortcut),
+                                    )
+                                },
                             )
                             .when(selected, |this| {
                                 this.child(
@@ -2044,6 +2013,15 @@ impl Drop for Launcher {
 
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.workbench_open
+            && let Some(panel) = &self.workbench
+        {
+            return div()
+                .size_full()
+                .capture_key_down(cx.listener(Self::key_down))
+                .child(panel.clone())
+                .into_any_element();
+        }
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.software_panel {
             return div()
@@ -2185,14 +2163,14 @@ impl Render for Launcher {
         let input_focused =
             window.is_window_active() && self.input.focus_handle(cx).is_focused(window);
         let modes = [
-            (Mode::Apps, IconName::AppWindow, "全部", ""),
-            (Mode::Files, IconName::FolderSearch, "文件", "/f "),
-            (Mode::Content, IconName::FileText, "内容", "/c "),
-            (Mode::Clipboard, IconName::FileText, "剪贴板", "/clip "),
-            (Mode::Uninstall, IconName::AppWindow, "卸载", "/uninstall "),
-            (Mode::System, IconName::Settings2, "系统", "/system "),
-            (Mode::Reminders, IconName::Clock, "提醒", "/remind "),
-            (Mode::Monitor, IconName::Activity, "监控", "/monitor "),
+            (Mode::Apps, IconName::AppWindow, "全部"),
+            (Mode::Files, IconName::FolderSearch, "文件"),
+            (Mode::Content, IconName::FileText, "内容"),
+            (Mode::Clipboard, IconName::FileText, "剪贴板"),
+            (Mode::Uninstall, IconName::AppWindow, "卸载"),
+            (Mode::System, IconName::Settings2, "系统"),
+            (Mode::Reminders, IconName::Clock, "提醒"),
+            (Mode::Monitor, IconName::Activity, "监控"),
         ];
         div()
             .size_full()
@@ -2259,6 +2237,15 @@ impl Render for Launcher {
                                     })),
                             )
                             .child(
+                                Button::new("workbench")
+                                    .label("工作台")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_workbench(workbench::Section::Saved, window, cx)
+                                    })),
+                            )
+                            .child(
                                 Button::new("reminder-badge")
                                     .label(self.reminder_badge())
                                     .icon(IconName::Clock)
@@ -2314,29 +2301,28 @@ impl Render for Launcher {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().flex().gap_1().children(modes.map(
-                        |(mode, icon, label, prefix)| {
-                            Button::new(label)
-                                .icon(icon)
-                                .label(label)
-                                .ghost()
-                                .small()
-                                .when(self.query.mode == mode, |button| {
-                                    button.bg(theme.accent).text_color(theme.primary)
-                                })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if mode == Mode::Reminders {
-                                        this.open_reminders("", window, cx);
-                                        return;
-                                    }
-                                    this.input.update(cx, |input, cx| {
-                                        input.set_value(prefix, window, cx);
-                                        input.focus(window, cx);
-                                    });
-                                    this.search(cx);
-                                }))
-                        },
-                    ))),
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .children(modes.map(|(mode, icon, label)| {
+                                Button::new(label)
+                                    .icon(icon)
+                                    .label(label)
+                                    .ghost()
+                                    .small()
+                                    .when(self.query.mode == mode, |button| {
+                                        button.bg(theme.accent).text_color(theme.primary)
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if mode == Mode::Reminders {
+                                            this.open_reminders("", window, cx);
+                                            return;
+                                        }
+                                        this.select_mode(mode, window, cx);
+                                    }))
+                            })),
+                    ),
             )
             .when_some(recent, |this, recent| this.child(recent))
             .when(
@@ -2381,7 +2367,7 @@ impl Render for Launcher {
                                 .child(if self.query.mode == Mode::Clipboard {
                                     "输入关键词，或用 图片 / 文件 / 链接 / 文本 / 日期 筛选"
                                 } else {
-                                    "试试 bluetooth、锁屏，或 /remind 10m 开会"
+                                    "输入 / 查看全部功能，或直接搜索中文名称"
                                 }),
                         )
                         .when(

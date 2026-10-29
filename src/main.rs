@@ -21,7 +21,18 @@ gpui_kit::assets::icon_assets!(
         Command,
         CornerDownLeft,
         StarFill,
-        Clock
+        Clock,
+        BookOpen,
+        CircleCheck,
+        Circle,
+        FileText,
+        Link,
+        Ellipsis,
+        Pin,
+        Pencil,
+        TriangleAlert,
+        RefreshCw,
+        Clipboard
     ]
 );
 

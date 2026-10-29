@@ -40,6 +40,9 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         input,
                         settings: None,
                         settings_subscription: None,
+                        workbench: None,
+                        workbench_open: false,
+                        workbench_subscription: None,
                         #[cfg(target_os = "macos")]
                         software_panel: None,
                         #[cfg(target_os = "macos")]
@@ -114,6 +117,196 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
         .unwrap()
     });
     (window.downcast().unwrap(), launcher)
+}
+
+#[gpui_kit::test]
+fn slash_lists_component_entries_without_searching_apps(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    let (worker, commands) = async_channel::bounded(8);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.worker = worker;
+            this.candidates.push(Candidate {
+                id: "app-that-matches-slash".into(),
+                title: "/".into(),
+                detail: String::new(),
+                path: PathBuf::from("/app"),
+                kind: Kind::App,
+                aliases: vec![],
+            });
+            this.input
+                .update(cx, |input, cx| input.set_value("/", window, cx));
+            this.search(cx);
+            for id in [
+                "command:saved",
+                "command:todos",
+                "command:ports",
+                "command:monitor",
+                "command:reminder",
+                "command:clipboard",
+                "command:files",
+                "command:content",
+                "command:uninstall",
+                "command:system",
+                "command:preferences",
+            ] {
+                assert!(
+                    this.results.iter().any(|candidate| candidate.id == id),
+                    "typing / must list {id}; got {:?}",
+                    this.results.iter().map(|c| &c.id).collect::<Vec<_>>()
+                );
+            }
+            #[cfg(target_os = "macos")]
+            assert!(
+                this.results
+                    .iter()
+                    .any(|c| c.id == "command:software-updates")
+            );
+            assert!(
+                this.results
+                    .iter()
+                    .all(|c| system_commands::resolve(&c.id).is_some())
+            );
+            assert!(!this.searching);
+            assert!(!this.monitor_sampling);
+            assert!(
+                commands.try_recv().is_err(),
+                "listing commands must not scan files"
+            );
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(("command-shortcut", 0usize)).visible());
+        let row = window.find(("result", 0usize)).bounds();
+        let shortcut = window.find(("command-shortcut", 0usize)).bounds();
+        assert!(shortcut.right() <= row.right() && shortcut.bottom() <= row.bottom());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn slash_filtering_and_enter_open_the_selected_mode(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    let (worker, _commands) = async_channel::bounded(8);
+    cx.update_window(handle.into(), |_, window, cx| {
+        launcher.update(cx, |this, cx| {
+            this.worker = worker;
+            this._subscriptions.push(cx.subscribe_in(
+                &this.input,
+                window,
+                |this, _, event, window, cx| {
+                    if let gpui_kit::component::input::InputEvent::PressEnter { .. } = event {
+                        this.open_selected(window, cx);
+                    }
+                },
+            ));
+            for (query, action) in [
+                ("/mon", BuiltinAction::Monitor),
+                ("/待办", BuiltinAction::Todos),
+                ("/cli", BuiltinAction::Search(Mode::Clipboard)),
+            ] {
+                this.input
+                    .update(cx, |input, cx| input.set_value(query, window, cx));
+                this.search(cx);
+                assert_eq!(system_commands::resolve(&this.results[0].id), Some(action));
+                assert!(!this.searching);
+            }
+        });
+    })
+    .unwrap();
+    for mode in [
+        Mode::Clipboard,
+        Mode::Files,
+        Mode::Content,
+        Mode::Uninstall,
+        Mode::System,
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            launcher.update(cx, |this, cx| {
+                this.input
+                    .update(cx, |input, cx| input.set_value("/", window, cx));
+                this.search(cx);
+                this.selected = this
+                    .results
+                    .iter()
+                    .position(|c| {
+                        system_commands::resolve(&c.id) == Some(BuiltinAction::Search(mode))
+                    })
+                    .unwrap();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert_eq!(launcher.read(cx).query.mode, mode);
+            assert_eq!(launcher.read(cx).input.read(cx).value(), mode.prefix());
+            assert!(launcher.read(cx).input.focus_handle(cx).is_focused(window));
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            launcher.read_with(cx, |this, _| this.query.mode),
+            Mode::Apps
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn workbench_search_opens_with_seed_and_escape_returns_to_launcher(cx: &mut TestAppContext) {
+    let (handle, launcher) = fixture(cx);
+    let dir = tempfile::tempdir().unwrap();
+    for (query, expected) in [
+        ("/save 发票", BuiltinAction::Saved),
+        ("/todo 读一篇论文", BuiltinAction::Todos),
+        ("/ports 3000", BuiltinAction::Ports),
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            launcher.update(cx, |this, cx| {
+                this.config_path = dir.path().join("config.toml");
+                this.input
+                    .update(cx, |s, cx| s.set_value(query, window, cx));
+                this.search(cx);
+                assert_eq!(this.results.len(), 1);
+                assert_eq!(
+                    system_commands::resolve(&this.results[0].id),
+                    Some(expected)
+                );
+                if expected != BuiltinAction::Ports {
+                    this.open_selected(window, cx);
+                    assert!(this.workbench_open);
+                    assert!(!this.monitor_sampling);
+                    assert!(!this.input.focus_handle(cx).is_focused(window));
+                }
+            });
+        })
+        .unwrap();
+        if expected == BuiltinAction::Ports {
+            continue;
+        }
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("workbench-back").visible());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(!launcher.read(cx).workbench_open);
+            assert!(launcher.read(cx).input.focus_handle(cx).is_focused(window));
+        })
+        .unwrap();
+    }
 }
 
 #[cfg(target_os = "macos")]

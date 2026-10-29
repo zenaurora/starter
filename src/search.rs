@@ -69,24 +69,18 @@ pub struct Query {
 impl Query {
     pub fn parse(input: &str) -> Self {
         let input = input.trim_start();
-        for (prefix, mode) in [
-            ("/f", Mode::Files),
-            ("/c", Mode::Content),
-            ("/uninstall", Mode::Uninstall),
-            ("/clip", Mode::Clipboard),
-            ("/clipboard", Mode::Clipboard),
-            ("/system", Mode::System),
-            ("/settings", Mode::System),
-            ("/remind", Mode::Reminders),
-            ("/reminder", Mode::Reminders),
-            ("/monitor", Mode::Monitor),
-        ] {
-            if let Some(rest) = input.strip_prefix(prefix)
-                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
-            {
+        if let Some((action, rest)) = crate::system_commands::parse(input) {
+            use crate::system_commands::Action;
+            let mode = match action {
+                Action::Search(mode) => Some(mode),
+                Action::Reminders => Some(Mode::Reminders),
+                Action::Monitor => Some(Mode::Monitor),
+                _ => None,
+            };
+            if let Some(mode) = mode {
                 return Self {
                     mode,
-                    text: rest.trim().to_owned(),
+                    text: rest.to_owned(),
                 };
             }
         }

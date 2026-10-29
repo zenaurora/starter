@@ -5,6 +5,8 @@ pub mod history;
 pub mod hotkeys;
 pub mod monitor;
 pub mod opening;
+pub mod organizer;
+pub mod ports;
 pub mod reminders;
 pub mod search;
 #[cfg(target_os = "macos")]

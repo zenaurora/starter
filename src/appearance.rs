@@ -1,5 +1,5 @@
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, Hsla, Window, rgb};
+use gpui_kit::{App, Hsla, Window, black, rgb};
 use starter::config::{Config, ThemeName};
 
 #[derive(Clone, Copy)]
@@ -80,12 +80,12 @@ pub fn apply(name: ThemeName, config: &Config, window: &mut Window, cx: &mut App
         theme.muted_foreground = p.muted;
         theme.primary = p.accent;
         theme.primary_foreground = p.base;
-        theme.primary_hover = p.accent;
-        theme.primary_active = p.accent;
+        theme.primary_hover = p.accent.blend(black().opacity(0.10));
+        theme.primary_active = p.accent.blend(black().opacity(0.22));
         theme.button_primary = p.accent;
         theme.button_primary_foreground = p.base;
-        theme.button_primary_hover = p.accent;
-        theme.button_primary_active = p.accent;
+        theme.button_primary_hover = theme.primary_hover;
+        theme.button_primary_active = theme.primary_active;
         theme.caret = p.accent;
         theme.input = p.border;
         theme.ring = p.accent;

@@ -2,6 +2,119 @@ use super::*;
 use gpui_kit::base::Disableable;
 
 impl Launcher {
+    pub(super) fn search(&mut self, cx: &mut Context<Self>) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.cancelled = Arc::new(AtomicBool::new(false));
+        self.generation += 1;
+        self.query = Query::parse(&self.input.read(cx).value());
+        if self.query.mode != Mode::Monitor {
+            self.monitor_actions = None;
+        }
+        self.set_monitor_sampling(
+            self.visible
+                && !self.workbench_open
+                && self.settings.is_none()
+                && self.query.mode == Mode::Monitor,
+        );
+        self.selected = 0;
+        self.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
+        if self.query.mode == Mode::Apps {
+            self.searching = false;
+            if let Some((section, tail)) = workbench::shortcut(&self.query.text) {
+                self.results = system_commands::candidate(section.action())
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                self.status = if tail.is_empty() {
+                    "Enter 打开工作台".into()
+                } else {
+                    format!("Enter 打开并带入：{tail}")
+                };
+                cx.notify();
+                return;
+            }
+            if let Some(results) = system_commands::palette(&self.query.text) {
+                self.results = results;
+                self.status = format!(
+                    "{} 个功能与命令 · 输入英文命令或中文名称筛选",
+                    self.results.len()
+                );
+                cx.notify();
+                return;
+            }
+            let commands = if self.query.text.is_empty() {
+                &[][..]
+            } else {
+                system_commands::candidates()
+            };
+            self.results = search::rank_apps(
+                self.candidates.iter().chain(commands),
+                &self.query.text,
+                &self.history.entries,
+                &self.config.favorites,
+            );
+            self.status = format!(
+                "{} 个应用{}",
+                self.catalog.apps.len(),
+                if self.catalog.warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!("，{} 处目录未能读取", self.catalog.warnings.len())
+                }
+            );
+        } else if self.query.mode == Mode::System {
+            self.searching = false;
+            self.results = search::rank(
+                system_commands::candidates(),
+                &self.query.text,
+                &Default::default(),
+            );
+            self.status = "输入英文或中文查找 · 重启和关机需确认".into();
+        } else if self.query.mode == Mode::Reminders {
+            self.searching = false;
+            self.reminder_results();
+        } else if self.query.mode == Mode::Monitor {
+            self.searching = false;
+            self.results.clear();
+            self.status = "每秒更新 · CPU 按整机计 · 应用内存为驻留量，含共享页".into();
+            self.sync_monitor_selection();
+        } else if self.query.mode == Mode::Uninstall {
+            self.searching = false;
+            let candidates: Vec<_> = self
+                .uninstall_targets
+                .iter()
+                .map(|target| target.candidate(&self.config))
+                .collect();
+            self.results = search::rank(&candidates, &self.query.text, &Default::default());
+            self.status = format!(
+                "{} 个可卸载应用 · 系统应用与 Starter 已排除",
+                self.uninstall_targets.len()
+            );
+        } else if self.query.mode == Mode::Clipboard {
+            self.searching = false;
+            self.clipboard_results();
+        } else {
+            self.results.clear();
+            self.searching = true;
+            self.status = "搜索中…".into();
+            let _ = self.worker.try_send(worker::Command::Search {
+                generation: self.generation,
+                query: self.query.clone(),
+                roots: self.config.search_roots.clone(),
+                cancelled: self.cancelled.clone(),
+            });
+        }
+        cx.notify();
+    }
+
+    pub(super) fn select_mode(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.set_value(mode.prefix(), window, cx);
+            input.focus(window, cx);
+        });
+        self.search(cx);
+    }
+
     pub(super) fn reminder_badge(&self) -> String {
         let due = self
             .reminder_entries

@@ -207,7 +207,7 @@ fn aggregate(rows: impl Iterator<Item = ProcessUsage>) -> Vec<ProcessUsage> {
     groups.into_values().collect()
 }
 
-fn app_bundle(path: &Path) -> Option<PathBuf> {
+pub(crate) fn app_bundle(path: &Path) -> Option<PathBuf> {
     // Helpers can be nested .app bundles; use the outermost owning bundle.
     path.ancestors()
         .filter(|p| p.extension().is_some_and(|e| e == "app"))
