@@ -180,6 +180,10 @@ impl Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(target_os = "macos")]
+        {
+            self.software_panel_visible = false;
+        }
         if self.has_uninstall_task()
             || self.reminder_panel.is_some()
             || self.power_busy

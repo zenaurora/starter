@@ -46,6 +46,8 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         #[cfg(target_os = "macos")]
                         software_panel: None,
                         #[cfg(target_os = "macos")]
+                        software_panel_visible: false,
+                        #[cfg(target_os = "macos")]
                         software_inventory: Default::default(),
                         #[cfg(target_os = "macos")]
                         software_subscription: None,

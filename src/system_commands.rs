@@ -88,6 +88,7 @@ pub enum Action {
     Reminders,
     Monitor,
     SoftwareUpdates,
+    SoftwareUpdatesAll,
     Saved,
     Todos,
     Ports,
@@ -162,6 +163,15 @@ const COMMANDS: &[Command] = &[
             "更新软件",
         ],
         action: Action::SoftwareUpdates,
+    },
+    #[cfg(target_os = "macos")]
+    Command {
+        id: "software-updates-all",
+        shortcut: "/all",
+        title: "全部更新",
+        detail: "选择所有可更新的软件并确认执行计划",
+        aliases: &["all", "全部更新", "更新全部"],
+        action: Action::SoftwareUpdatesAll,
     },
     Command {
         id: "clipboard",
@@ -382,6 +392,7 @@ pub fn candidates() -> &'static [Candidate] {
                         Action::Search(_) => Kind::SystemCommand,
                         Action::Power(_)
                         | Action::SoftwareUpdates
+                        | Action::SoftwareUpdatesAll
                         | Action::Saved
                         | Action::Todos
                         | Action::Ports => Kind::SystemCommand,

@@ -1,7 +1,7 @@
 use super::Invocation;
 use anyhow::{Context, Result, bail, ensure};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::File,
     io::Read,
     os::unix::{fs::PermissionsExt, process::CommandExt},
@@ -11,6 +11,26 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+const PROXY_VARIABLES: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
+fn preserve_proxy_variables(variables: &mut Vec<(OsString, OsString)>) {
+    for key in PROXY_VARIABLES {
+        if let Some(value) = std::env::var_os(key) {
+            variables.retain(|(existing, _)| existing != OsStr::new(key));
+            variables.push(((*key).into(), value));
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Environment {
@@ -74,6 +94,9 @@ impl Environment {
         // Preserve the manager's registry, credentials, mirrors and installation settings.
         // Reconstructing a whitelist silently changes source configuration for some tools.
         let mut variables: Vec<_> = std::env::vars_os().collect();
+        // Make proxy forwarding explicit: update commands run with env_clear(), and GUI apps
+        // commonly receive either uppercase or lowercase proxy names.
+        preserve_proxy_variables(&mut variables);
         for (key, value) in [
             ("PATH".into(), path.clone()),
             ("HOME".into(), home.as_os_str().into()),
@@ -214,6 +237,33 @@ impl Environment {
                 return read_limited(stdout, OUTPUT_LIMIT);
             }
             thread::sleep(Duration::from_millis(30));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_commands_keep_upper_and_lowercase_proxy_variables() {
+        let root = tempfile::tempdir().unwrap();
+        let mut environment = Environment::fixture(root.path(), Path::new("/bin"));
+        for (key, value) in [
+            ("HTTP_PROXY", "http://upper.example:8080"),
+            ("HTTPS_PROXY", "http://secure.example:8443"),
+            ("ALL_PROXY", "socks5://all.example:1080"),
+            ("NO_PROXY", "localhost,127.0.0.1"),
+            ("http_proxy", "http://lower.example:8080"),
+            ("https_proxy", "http://lower-secure.example:8443"),
+            ("all_proxy", "socks5://lower-all.example:1080"),
+            ("no_proxy", "localhost"),
+        ] {
+            environment.variables.push((key.into(), value.into()));
+        }
+        let variables = environment.variables_for(Path::new("/bin/tool"));
+        for key in PROXY_VARIABLES {
+            assert!(variables.iter().any(|(name, _)| name == OsStr::new(key)));
         }
     }
 }

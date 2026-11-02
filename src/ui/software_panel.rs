@@ -34,6 +34,23 @@ const ICON_WIDTH: f32 = 16.;
 const INSTALLED_WIDTH: f32 = 82.;
 const STATUS_WIDTH: f32 = 88.;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackAction {
+    HideWhileRunning,
+    ReturnToList,
+    Close,
+}
+
+fn back_action(running: bool, show_task: bool) -> BackAction {
+    if running {
+        BackAction::HideWhileRunning
+    } else if show_task {
+        BackAction::ReturnToList
+    } else {
+        BackAction::Close
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Filter {
     All,
@@ -68,14 +85,18 @@ pub(super) struct SoftwarePanel {
     cancelled: Arc<AtomicBool>,
     scan_cancelled: Arc<AtomicBool>,
     task_cancelled: Arc<AtomicBool>,
+    all_requested: bool,
     _scan: Option<Task<()>>,
     _run: Option<Task<()>>,
     _menu: Option<Subscription>,
     _input: Subscription,
     _quit: Subscription,
 }
-pub(super) struct Close;
-impl EventEmitter<Close> for SoftwarePanel {}
+pub(super) enum Event {
+    Close,
+    Hide,
+}
+impl EventEmitter<Event> for SoftwarePanel {}
 impl SoftwarePanel {
     pub(super) fn new(
         theme: ThemeName,
@@ -154,6 +175,7 @@ impl SoftwarePanel {
             cancelled: Arc::new(AtomicBool::new(false)),
             scan_cancelled: Arc::new(AtomicBool::new(false)),
             task_cancelled: Arc::new(AtomicBool::new(false)),
+            all_requested: false,
             _scan: None,
             _run: None,
             _menu: None,
@@ -217,6 +239,8 @@ impl SoftwarePanel {
                     .unwrap_or(this.selected.min(this.visible.len().saturating_sub(1)));
                 if mode == ScanMode::Cached && !this.snapshot.checked_online {
                     this.scan(ScanMode::Background, window, cx);
+                } else if this.all_requested {
+                    this.review_all(window, cx);
                 }
             });
         }));
@@ -258,6 +282,26 @@ impl SoftwarePanel {
                 self.feedback = error.to_string();
                 cx.notify();
             }
+        }
+    }
+    fn review_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.all_requested = false;
+        let selected = self
+            .snapshot
+            .items
+            .iter()
+            .filter(|item| item.can_update())
+            .map(|item| item.id.clone())
+            .collect();
+        self.review(selected, window, cx);
+    }
+    pub(super) fn request_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.running {
+            return;
+        }
+        self.all_requested = true;
+        if !self.scanning {
+            self.review_all(window, cx);
         }
     }
     fn review_plan(&mut self, plan: Plan, window: &mut Window, cx: &mut Context<Self>) {
@@ -472,16 +516,15 @@ impl SoftwarePanel {
         cx.notify();
     }
     fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.running {
-            return;
-        }
-        if self.show_task {
-            self.show_task = false;
-            self.terminal = None;
-            self.focus(window, cx);
-            cx.notify();
-        } else {
-            cx.emit(Close);
+        match back_action(self.running, self.show_task) {
+            BackAction::HideWhileRunning => cx.emit(Event::Hide),
+            BackAction::ReturnToList => {
+                self.show_task = false;
+                self.terminal = None;
+                self.focus(window, cx);
+                cx.notify();
+            }
+            BackAction::Close => cx.emit(Event::Close),
         }
     }
     fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1054,7 +1097,6 @@ impl Render for SoftwarePanel {
                             .icon(IconName::ChevronLeft)
                             .ghost()
                             .small()
-                            .disabled(self.running)
                             .on_click(cx.listener(|this, _, window, cx| this.back(window, cx))),
                     )
                     .child(
@@ -1361,6 +1403,14 @@ mod tests {
     use core::prelude::v1::test;
     use gpui_kit::{base::Root, test::TestWindowExt};
     use starter::software_updates::{Invocation, Source};
+
+    #[test]
+    fn back_keeps_a_running_update_alive() {
+        assert_eq!(back_action(true, true), BackAction::HideWhileRunning);
+        assert_eq!(back_action(true, false), BackAction::HideWhileRunning);
+        assert_eq!(back_action(false, true), BackAction::ReturnToList);
+        assert_eq!(back_action(false, false), BackAction::Close);
+    }
     fn software(name: &str, state: UpdateState) -> Arc<Software> {
         Arc::new(Software {
             id: name.into(),

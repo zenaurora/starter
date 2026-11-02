@@ -1775,6 +1775,10 @@ impl super::Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(target_os = "macos")]
+        {
+            self.software_panel_visible = false;
+        }
         let initial = shortcut(&self.query.text)
             .filter(|(s, _)| *s == section)
             .map(|(_, tail)| tail.to_string())
