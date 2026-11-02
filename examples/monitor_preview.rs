@@ -1841,12 +1841,15 @@ mod ui {
         #[cfg(target_os = "macos")]
         software_panel: Option<Entity<software_panel::SoftwarePanel>>,
         #[cfg(target_os = "macos")]
+        software_panel_visible: bool,
+        #[cfg(target_os = "macos")]
         software_inventory: std::sync::Arc<starter::software_updates::Inventory>,
         #[cfg(target_os = "macos")]
         software_subscription: Option<Subscription>,
         error_dialog: Option<Entity<ErrorDialog>>,
         error_dialog_subscription: Option<Subscription>,
         icons: Icons,
+        home_display: String,
         config: Config,
         config_path: PathBuf,
         // 持有托盘、全局快捷键管理器等系统资源，不是终端或命令行 shell。
@@ -2135,12 +2138,17 @@ mod ui {
                 #[cfg(target_os = "macos")]
                 software_panel: None,
                 #[cfg(target_os = "macos")]
+                software_panel_visible: false,
+                #[cfg(target_os = "macos")]
                 software_inventory: Default::default(),
                 #[cfg(target_os = "macos")]
                 software_subscription: None,
                 error_dialog,
                 error_dialog_subscription,
                 icons,
+                home_display: dirs::home_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
                 config,
                 config_path,
                 shell,
@@ -2963,6 +2971,10 @@ mod ui {
                         self.status = "请在 Starter 主程序中打开软件更新".into();
                         cx.notify();
                     }
+                    BuiltinAction::SoftwareUpdatesAll => {
+                        self.status = "请在 Starter 主程序中打开软件更新".into();
+                        cx.notify();
+                    }
                 }
                 return;
             }
@@ -3496,9 +3508,7 @@ mod ui {
                 self.icons.get(&candidate.path)
             };
             let clipboard_id = candidate.id.clone();
-            let home = dirs::home_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
+            let home = &self.home_display;
             let detail = if app {
                 candidate
                     .path
@@ -3508,8 +3518,8 @@ mod ui {
             } else {
                 candidate.detail.clone()
             };
-            let detail = if !home.is_empty() && detail.starts_with(&home) {
-                detail.replacen(&home, "~", 1)
+            let detail = if !home.is_empty() && detail.starts_with(home.as_str()) {
+                detail.replacen(home.as_str(), "~", 1)
             } else {
                 detail
             };
@@ -4044,12 +4054,17 @@ mod ui {
                 #[cfg(target_os = "macos")]
                 software_panel: None,
                 #[cfg(target_os = "macos")]
+                software_panel_visible: false,
+                #[cfg(target_os = "macos")]
                 software_inventory: Default::default(),
                 #[cfg(target_os = "macos")]
                 software_subscription: None,
                 error_dialog: None,
                 error_dialog_subscription: None,
                 icons: Icons::new().0,
+                home_display: dirs::home_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
                 config,
                 config_path: std::env::temp_dir().join("starter-ui-test-config.toml"),
                 shell: None,

@@ -270,10 +270,12 @@ pub(super) fn key_label(value: &str) -> String {
 }
 
 fn choices() -> Vec<KeyChoice> {
-    let mut values = ["Super", "Ctrl", "Alt", "Shift"]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let mut values = Vec::with_capacity(4 + 26 + 10 + 39 + 24 + 10);
+    values.extend(
+        ["Super", "Ctrl", "Alt", "Shift"]
+            .into_iter()
+            .map(str::to_string),
+    );
     values.extend(('A'..='Z').map(|key| format!("Key{key}")));
     values.extend((0..=9).map(|key| format!("Digit{key}")));
     values.extend(

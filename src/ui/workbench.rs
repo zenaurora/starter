@@ -461,6 +461,11 @@ impl Workbench {
             .and_then(|&i| self.sockets.get(i))
             .cloned()
     }
+    fn selected_socket_ref(&self) -> Option<&ports::Socket> {
+        self.visible
+            .get(self.selected)
+            .and_then(|&i| self.sockets.get(i))
+    }
     fn draft(&self, cx: &App) -> Draft {
         if self.editor.as_ref().is_some_and(|e| e.kind != Kind::Todo) {
             return Draft::saved(
@@ -622,7 +627,7 @@ impl Workbench {
         if self.section == Section::Ports {
             if let Some(socket) = self.selected_socket() {
                 match action {
-                    Action::Copy => self.copy(socket.address.clone(), cx),
+                    Action::Copy => self.copy(socket.address, cx),
                     Action::CopyPid => self.copy(socket.pid.to_string(), cx),
                     Action::CopyPath => {
                         if let Some(path) = socket
@@ -761,7 +766,7 @@ impl Workbench {
         }
         self.selected = index;
         let entries = if self.section == Section::Ports {
-            let Some(socket) = self.selected_socket() else {
+            let Some(socket) = self.selected_socket_ref() else {
                 return;
             };
             let mut entries = vec![
@@ -1093,7 +1098,7 @@ impl Workbench {
             .border_l_1()
             .border_color(theme.border);
         if self.section == Section::Ports {
-            if let Some(s) = self.selected_socket() {
+            if let Some(s) = self.selected_socket_ref() {
                 detail = detail
                     .child(
                         div()
@@ -2140,7 +2145,7 @@ mod tests {
                                 kind: Kind::Todo,
                                 title: todo.title.clone(),
                                 body: todo.body.clone(),
-                                url: todo.url.clone(),
+                                url: todo.url,
                             },
                         }),
                         result: Ok(Arc::new(data.clone())),

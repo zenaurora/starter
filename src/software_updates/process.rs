@@ -241,32 +241,6 @@ impl Environment {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn update_commands_keep_upper_and_lowercase_proxy_variables() {
-        let root = tempfile::tempdir().unwrap();
-        let mut environment = Environment::fixture(root.path(), Path::new("/bin"));
-        for (key, value) in [
-            ("HTTP_PROXY", "http://upper.example:8080"),
-            ("HTTPS_PROXY", "http://secure.example:8443"),
-            ("ALL_PROXY", "socks5://all.example:1080"),
-            ("NO_PROXY", "localhost,127.0.0.1"),
-            ("http_proxy", "http://lower.example:8080"),
-            ("https_proxy", "http://lower-secure.example:8443"),
-            ("all_proxy", "socks5://lower-all.example:1080"),
-            ("no_proxy", "localhost"),
-        ] {
-            environment.variables.push((key.into(), value.into()));
-        }
-        let variables = environment.variables_for(Path::new("/bin/tool"));
-        for key in PROXY_VARIABLES {
-            assert!(variables.iter().any(|(name, _)| name == OsStr::new(key)));
-        }
-    }
-}
 const OUTPUT_LIMIT: u64 = 16 * 1024 * 1024;
 fn read_limited(mut file: File, limit: u64) -> Result<String> {
     use std::io::{Seek, SeekFrom};
@@ -294,4 +268,31 @@ pub(super) fn package_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "@/._+-".contains(c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_commands_keep_upper_and_lowercase_proxy_variables() {
+        let root = tempfile::tempdir().unwrap();
+        let mut environment = Environment::fixture(root.path(), Path::new("/bin"));
+        for (key, value) in [
+            ("HTTP_PROXY", "http://upper.example:8080"),
+            ("HTTPS_PROXY", "http://secure.example:8443"),
+            ("ALL_PROXY", "socks5://all.example:1080"),
+            ("NO_PROXY", "localhost,127.0.0.1"),
+            ("http_proxy", "http://lower.example:8080"),
+            ("https_proxy", "http://lower-secure.example:8443"),
+            ("all_proxy", "socks5://lower-all.example:1080"),
+            ("no_proxy", "localhost"),
+        ] {
+            environment.variables.push((key.into(), value.into()));
+        }
+        let variables = environment.variables_for(Path::new("/bin/tool"));
+        for key in PROXY_VARIABLES {
+            assert!(variables.iter().any(|(name, _)| name == OsStr::new(key)));
+        }
+    }
 }

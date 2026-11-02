@@ -330,10 +330,12 @@ mod tests {
             );
         }
         assert!(select_asset(&assets, "0.4.1", "macos", "aarch64", false).is_err());
-        let mut tampered = assets.clone();
-        tampered[0].browser_download_url = "https://example.com/evil".into();
-        assert!(select_asset(&tampered, "0.4.0", "macos", "aarch64", false).is_err());
-        tampered = assets.clone();
+        {
+            let mut tampered = assets.clone();
+            tampered[0].browser_download_url = "https://example.com/evil".into();
+            assert!(select_asset(&tampered, "0.4.0", "macos", "aarch64", false).is_err());
+        }
+        let mut tampered = assets;
         tampered[0].digest = None;
         assert!(select_asset(&tampered, "0.4.0", "macos", "aarch64", false).is_err());
     }

@@ -71,10 +71,9 @@ impl Shell {
             .iter()
             .map(|(item, event)| (item.id().clone(), event.clone()))
             .collect();
-        let menu_sender = sender.clone();
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             if let Some((_, action)) = mapping.iter().find(|(id, _)| *id == event.id) {
-                let _ = menu_sender.try_send(action.clone());
+                let _ = sender.try_send(action.clone());
             }
         }));
         let tray = TrayIconBuilder::new()

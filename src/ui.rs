@@ -71,6 +71,9 @@ pub struct Launcher {
     error_dialog: Option<Entity<ErrorDialog>>,
     error_dialog_subscription: Option<Subscription>,
     icons: Icons,
+    // Rendered rows use this prefix frequently; resolve it once per launcher
+    // instead of querying the environment and formatting a path for every row.
+    home_display: String,
     config: Config,
     config_path: PathBuf,
     // 持有托盘、全局快捷键管理器等系统资源，不是终端或命令行 shell。
@@ -191,6 +194,9 @@ impl Launcher {
             cx.on_blur(&input_focus, window, |_, _, cx| cx.notify()),
         ];
         let (icons, icon_events) = Icons::new();
+        let home_display = dirs::home_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
         let (worker, worker_events) = worker::start();
         let clipboard_root = config_path.with_file_name("clipboard");
         let (clipboard_worker, clipboard_events) =
@@ -368,6 +374,7 @@ impl Launcher {
             error_dialog,
             error_dialog_subscription,
             icons,
+            home_display,
             config,
             config_path,
             shell,
@@ -1858,9 +1865,7 @@ impl Launcher {
             self.icons.get(&candidate.path)
         };
         let clipboard_id = candidate.id.clone();
-        let home = dirs::home_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let home = &self.home_display;
         let detail = if app {
             candidate
                 .path
@@ -1870,8 +1875,8 @@ impl Launcher {
         } else {
             candidate.detail.clone()
         };
-        let detail = if !home.is_empty() && detail.starts_with(&home) {
-            detail.replacen(&home, "~", 1)
+        let detail = if !home.is_empty() && detail.starts_with(home.as_str()) {
+            detail.replacen(home.as_str(), "~", 1)
         } else {
             detail
         };

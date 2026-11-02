@@ -201,7 +201,6 @@ impl Inventory {
         cancelled: &AtomicBool,
         environment: Environment,
     ) -> Arc<Snapshot> {
-        let app_paths: Vec<_> = apps.iter().map(|app| app.path.clone()).collect();
         let _guard = loop {
             if cancelled.load(Ordering::Relaxed) {
                 return self.cached().unwrap_or_default();
@@ -217,11 +216,16 @@ impl Inventory {
             && let Some(snapshot) = self.cached()
             && snapshot.created.elapsed()
                 < Duration::from_secs(if snapshot.checked_online { 600 } else { 120 })
-            && snapshot.apps == app_paths
+            && snapshot
+                .apps
+                .iter()
+                .map(|path| path.as_path())
+                .eq(apps.iter().map(|app| app.path.as_path()))
             && snapshot.environment == environment
         {
             return snapshot;
         }
+        let app_paths: Vec<_> = apps.iter().map(|app| app.path.clone()).collect();
         let check = matches!(mode, ScanMode::Check | ScanMode::Background);
         let mut batch = providers::scan(&environment, mode, cancelled);
         if !cancelled.load(Ordering::Relaxed) {

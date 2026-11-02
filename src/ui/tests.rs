@@ -54,6 +54,9 @@ fn fixture(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Launcher>) {
                         error_dialog: None,
                         error_dialog_subscription: None,
                         icons: Icons::new().0,
+                        home_display: dirs::home_dir()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_default(),
                         config,
                         config_path: std::env::temp_dir().join("starter-ui-test-config.toml"),
                         shell: None,
