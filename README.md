@@ -4,7 +4,7 @@ Starter 是一个使用 Rust 和 GPU 原生渲染的桌面启动器。它常驻�
 
 **macOS** `Option+Space` · **Windows** `Ctrl+Space`
 
-[Starter 0.8.0 release notes](docs/releases/0.8.0.md)
+[Starter 0.9.0 release notes](docs/releases/0.9.0.md)
 
 ## 功能
 
@@ -22,7 +22,7 @@ Starter 是一个使用 Rust 和 GPU 原生渲染的桌面启动器。它常驻�
 
 ## 安装和启动
 
-开发运行需要 Rust 1.90+（2024 edition）。
+开发运行需要 Rust 1.98+（2024 edition，新版 GPUI 依赖要求）。
 
 macOS 应使用 `.app` 包，以获得正确的菜单栏、图标和窗口行为：
 

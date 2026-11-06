@@ -34,7 +34,7 @@ pub fn parts(value: &str) -> Result<Vec<String>> {
     let key = parse(value)?;
     let mut parts = Vec::new();
     for (modifier, name) in [
-        (Modifiers::SUPER, "Super"),
+        (Modifiers::META, "Super"),
         (Modifiers::CONTROL, "Ctrl"),
         (Modifiers::ALT, "Alt"),
         (Modifiers::SHIFT, "Shift"),

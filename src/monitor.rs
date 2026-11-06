@@ -8,7 +8,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use sysinfo::{Disks, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{DiskRefreshKind, Disks, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 mod actions;
 pub use actions::{Action, perform};
@@ -90,8 +90,9 @@ pub fn start() -> (Sender<bool>, Receiver<Snapshot>) {
     thread::Builder::new()
         .name("starter-monitor".into())
         .spawn(move || {
-            let mut system = System::new();
-            let mut disks = Disks::new();
+            let mut system =
+                System::new().expect("system monitoring is supported on this platform");
+            let mut disks = Disks::new().expect("disk monitoring is supported on this platform");
             let mut enabled = false;
             let mut disk_sample = Instant::now();
             loop {
@@ -100,7 +101,8 @@ pub fn start() -> (Sender<bool>, Receiver<Snapshot>) {
                         Ok(true) => {
                             enabled = true;
                             refresh(&mut system);
-                            disks.refresh_list();
+                            disks
+                                .refresh_specifics(true, DiskRefreshKind::nothing().with_storage());
                             disk_sample = Instant::now();
                         }
                         Ok(false) => continue,
@@ -118,7 +120,7 @@ pub fn start() -> (Sender<bool>, Receiver<Snapshot>) {
                 }
                 refresh(&mut system);
                 if disk_sample.elapsed() >= Duration::from_secs(15) {
-                    disks.refresh();
+                    disks.refresh_specifics(true, DiskRefreshKind::nothing().with_storage());
                     disk_sample = Instant::now();
                 }
                 let snapshot = snapshot(&system, &disks);
@@ -137,7 +139,8 @@ fn refresh(system: &mut System) {
     system.refresh_cpu_usage();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
-        ProcessRefreshKind::new()
+        true,
+        ProcessRefreshKind::nothing()
             .with_cpu()
             .with_memory()
             .with_exe(UpdateKind::OnlyIfNotSet),
@@ -221,7 +224,6 @@ fn system_disk(disks: &Disks) -> (u64, u64) {
     #[cfg(not(target_os = "windows"))]
     let root = Some(PathBuf::from("/"));
     let disk = disks
-        .list()
         .iter()
         .filter(|disk| {
             root.as_ref()
@@ -309,6 +311,7 @@ mod tests {
         assert!(sample.memory_total > 0);
         assert!(sample.memory_used <= sample.memory_total);
         assert!((0.0..=100.0).contains(&sample.cpu_percent));
+        assert!(sample.disk_total > 0);
         assert!(sample.disk_used <= sample.disk_total);
         assert!(sample.processes.iter().any(|p| p.memory > 0));
         commands.send(false).unwrap();

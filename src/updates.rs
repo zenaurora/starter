@@ -242,7 +242,7 @@ fn copy_verified(
     }
     ensure!(received == asset.size, "安装包下载不完整");
     progress(Status::Verifying { total: asset.size });
-    let actual = format!("sha256:{:x}", hash.finalize());
+    let actual = format!("sha256:{}", hex::encode(hash.finalize()));
     ensure!(
         asset
             .digest
@@ -306,7 +306,7 @@ mod tests {
             ),
             name,
             size: bytes.len() as u64,
-            digest: Some(format!("sha256:{:x}", Sha256::digest(bytes))),
+            digest: Some(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))),
         }
     }
 

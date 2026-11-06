@@ -62,10 +62,11 @@ pub fn scan(cancelled: &AtomicBool) -> Result<Vec<Socket>> {
     if cancelled.load(Ordering::Relaxed) {
         bail!("扫描已取消");
     }
-    let mut before = System::new();
+    let mut before = System::new().context("无法读取进程信息")?;
     before.refresh_processes_specifics(
         ProcessesToUpdate::All,
-        ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+        true,
+        ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
     );
     #[cfg(target_os = "macos")]
     let mut rows = {
@@ -91,11 +92,12 @@ pub fn scan(cancelled: &AtomicBool) -> Result<Vec<Socket>> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let mut after = System::new();
+    let mut after = System::new().context("无法核实进程身份")?;
     if !pids.is_empty() {
         after.refresh_processes_specifics(
             ProcessesToUpdate::Some(&pids),
-            ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+            true,
+            ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
         );
     }
     for row in &mut rows {

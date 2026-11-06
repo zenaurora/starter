@@ -30,7 +30,7 @@ impl Action {
 /// already exited. A normal quit can display a save dialog or be cancelled.
 pub fn perform(action: Action, row: &ProcessUsage) -> Result<String> {
     protect_target(row)?;
-    let mut system = System::new();
+    let mut system = System::new()?;
     let mut skipped = 0;
     let mut report = Report::default();
     match action {
@@ -40,7 +40,8 @@ pub fn perform(action: Action, row: &ProcessUsage) -> Result<String> {
             // CPU/memory sampling and force a fresh image path for this action only.
             system.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&pids),
-                ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+                true,
+                ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
             );
             let mut verified = Vec::new();
             for expected in &row.members {
@@ -85,7 +86,8 @@ fn verify_before_signal(
     let pid = Pid::from_u32(expected.pid);
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
-        ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+        true,
+        ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
     );
     let Some(current) = system.process(pid) else {
         bail!("进程已退出或身份已变化");
@@ -472,13 +474,14 @@ mod tests {
             .spawn()
             .unwrap();
         let fixture = Fixture(child);
-        let mut system = System::new();
+        let mut system = System::new().unwrap();
         let pid = Pid::from_u32(fixture.0.id());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         loop {
             system.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&[pid]),
-                ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+                true,
+                ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
             );
             if let Some(process) = system
                 .process(pid)

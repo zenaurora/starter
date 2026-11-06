@@ -253,7 +253,7 @@ impl Store {
                 hash.update(serde_json::to_vec(paths)?);
             }
         }
-        let id = format!("{:x}", hash.finalize());
+        let id = hex::encode(hash.finalize());
         if let Some(index) = self.entries.iter().position(|e| e.id == id) {
             let mut entry = self.entries.remove(index);
             entry.copied_at = time;

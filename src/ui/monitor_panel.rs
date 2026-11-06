@@ -526,7 +526,7 @@ impl Launcher {
                 this.close_monitor_actions(window, cx);
                 cx.stop_propagation();
             }))
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .px_2()

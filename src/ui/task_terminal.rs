@@ -5,12 +5,16 @@ use starter::{
     config::ThemeName,
     task_terminal::{Event, Session, Size},
 };
-use std::ops::Range;
+use std::{num::NonZeroU16, ops::Range};
 use unicode_width::UnicodeWidthStr;
 
 const FONT_SIZE: f32 = 13.;
 const LINE_HEIGHT: f32 = 20.;
 type CellPosition = (u16, u16);
+
+fn nonzero(value: u16) -> NonZeroU16 {
+    NonZeroU16::new(value).expect("terminal dimensions are clamped to at least one")
+}
 
 #[derive(Default)]
 struct Responses(Vec<Vec<u8>>);
@@ -65,7 +69,12 @@ pub(super) struct TerminalView {
 impl TerminalView {
     pub(super) fn new(theme: ThemeName, cx: &mut Context<Self>) -> Self {
         Self {
-            parser: vt100::Parser::new_with_callbacks(18, 88, 2000, Responses::default()),
+            parser: vt100::Parser::new_with_callbacks(
+                NonZeroU16::new(18).unwrap(),
+                NonZeroU16::new(88).unwrap(),
+                2000,
+                Responses::default(),
+            ),
             session: None,
             focus: cx.focus_handle(),
             bounds: None,
@@ -84,8 +93,8 @@ impl TerminalView {
     pub(super) fn attach(&mut self, session: Session, cx: &mut Context<Self>) {
         let (rows, cols) = self.parser.screen().size();
         let _ = session.resize(Size {
-            rows,
-            cols,
+            rows: rows.get(),
+            cols: cols.get(),
             ..Size::default()
         });
         self.session = Some(session);
@@ -190,7 +199,7 @@ impl TerminalView {
                 }
                 "a" => {
                     let (rows, cols) = self.parser.screen().size();
-                    self.selection = Some(((0, 0), (rows - 1, cols)));
+                    self.selection = Some(((0, 0), (rows.get() - 1, cols.get())));
                 }
                 _ => return,
             }
@@ -212,6 +221,7 @@ impl TerminalView {
             return (0, 0);
         };
         let (rows, cols) = self.parser.screen().size();
+        let (rows, cols) = (rows.get(), cols.get());
         let row = ((point.y - bounds.top()).as_f32() / LINE_HEIGHT)
             .floor()
             .clamp(0., (rows - 1) as f32) as u16;
@@ -221,7 +231,7 @@ impl TerminalView {
         (row, col)
     }
 
-    fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.scroll_delta += match event.delta {
             ScrollDelta::Pixels(point) => point.y.as_f32() / LINE_HEIGHT,
             ScrollDelta::Lines(point) => point.y,
@@ -250,8 +260,10 @@ impl TerminalView {
         let cols = (bounds.size.width.as_f32() / cell_width)
             .floor()
             .clamp(1., 300.) as u16;
-        if self.parser.screen().size() != (rows, cols) {
-            self.parser.screen_mut().set_size(rows, cols);
+        if self.parser.screen().size() != (nonzero(rows), nonzero(cols)) {
+            self.parser
+                .screen_mut()
+                .set_size(nonzero(rows), nonzero(cols));
             self.selection = None;
             if let Some(session) = &self.session {
                 let _ = session.resize(Size {
@@ -269,6 +281,7 @@ fn output_text(screen: &vt100::Screen) -> String {
     screen.set_scrollback(usize::MAX);
     let history = screen.scrollback();
     let (_, cols) = screen.size();
+    let cols = cols.get();
     let mut lines = Vec::with_capacity(history);
     for offset in (1..=history).rev() {
         screen.set_scrollback(offset);
@@ -477,7 +490,7 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
             .on_key_down(cx.listener(Self::key_down))
-            .on_scroll_wheel(cx.listener(Self::scroll))
+            .on_scroll(cx.listener(Self::scroll))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -597,6 +610,7 @@ fn paint_terminal(
     cx: &mut App,
 ) {
     let (rows, cols) = state.screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
     let selection = state.selection.map(|(start, end)| {
         if start <= end {
             (start, end)
@@ -822,7 +836,12 @@ mod tests {
 
     #[test]
     fn ansi_repainting_split_utf8_and_terminal_queries_are_interpreted() {
-        let mut parser = vt100::Parser::new_with_callbacks(4, 30, 20, Responses::default());
+        let mut parser = vt100::Parser::new_with_callbacks(
+            NonZeroU16::new(4).unwrap(),
+            NonZeroU16::new(30).unwrap(),
+            20,
+            Responses::default(),
+        );
         parser.process(b"old line\r\x1b[2K\x1b[32mnew ");
         let text = "中文";
         parser.process(&text.as_bytes()[..2]);
@@ -839,7 +858,11 @@ mod tests {
 
     #[test]
     fn copying_output_includes_scrollback_even_while_viewing_old_lines() {
-        let mut parser = vt100::Parser::new(2, 40, 20);
+        let mut parser = vt100::Parser::new(
+            NonZeroU16::new(2).unwrap(),
+            NonZeroU16::new(40).unwrap(),
+            20,
+        );
         parser.process(b"one\r\ntwo\r\nthree\r\nfour");
         parser.screen_mut().set_scrollback(1);
         assert_eq!(output_text(parser.screen()), "one\ntwo\nthree\nfour");
