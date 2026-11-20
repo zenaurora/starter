@@ -1597,6 +1597,7 @@ impl Launcher {
                             this.software_panel_visible = false;
                             cx.notify();
                         }
+                        software_panel::Event::Handoff => this.hide(window, cx),
                         software_panel::Event::Close => {
                             this.software_panel = None;
                             this.software_panel_visible = false;

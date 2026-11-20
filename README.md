@@ -4,7 +4,7 @@ Starter 是一个使用 Rust 和 GPU 原生渲染的桌面启动器。它常驻�
 
 **macOS** `Option+Space` · **Windows** `Ctrl+Space`
 
-[Starter 0.9.0 release notes](docs/releases/0.9.0.md)
+[Starter 0.9.1 release notes](docs/releases/0.9.1.md)
 
 ## 功能
 
@@ -99,6 +99,8 @@ macOS 点击首页「软件更新」，或搜索 `/update` 打开。此功能直
 - 打开面板后自动后台查询版本；「检查更新」或 `⌘R` 还会刷新 Homebrew 元数据。支持 npm/pnpm/rustup、Sparkle appcast、App Store 公开接口，以及应用文件名和 bundle ID 双重匹配的 Homebrew Cask 目录。自更新 cask 对比实际应用版本，避免被旧安装记录误导。检查失败、更新源待确认和未检查分别显示，不把网络失败当成已是最新。
 - Homebrew 固定项不能更新；Node 更新交给原管理器、不强制 `--latest`，链接、别名和自定义来源交回原环境；uv/pipx 保留原安装策略；Cargo 仅在标准 registry 来源及安装参数完整时可执行，保留原 binaries、features、target、profile 和版本约束。
 - 独立 CLI 只在已确认的原生安装位置或安装收据匹配时开放自更新，避免与包管理器重复管理。独立 Deno 的频道、Kimi 的产品版本或其他安装来源未确认时提供官方处理入口。App Store、macOS、Sparkle 和其他应用使用原更新入口；未知官网不猜测，不自动下载或替换应用。Conda/MacPorts/Nix/TeX/RubyGems/Yarn 目前只提供检测和说明入口，不承诺逐包自动更新。
+
+官网安装的应用在右键菜单中提供「打开应用检查更新」：打开原应用并收起 Starter，需在原应用内检查和安装更新；这个操作不会直接触发第三方应用的更新命令。再次呼出 Starter 会保留软件更新列表和操作提示，打开失败时在面板显示原因。
 
 右键菜单分组提供更新、固定 Homebrew 版本、多选、主页、访达定位和复制名称/路径，支持方向键、回车、Esc，并在窗口边缘自动避让。终端支持输入、复制与中断；返回列表后释放终端缓冲，仍可查看上次逐项结果。管理器可能调整依赖或同组包，计划页会提示。
 

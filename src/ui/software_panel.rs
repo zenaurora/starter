@@ -95,6 +95,7 @@ pub(super) struct SoftwarePanel {
 pub(super) enum Event {
     Close,
     Hide,
+    Handoff,
 }
 impl EventEmitter<Event> for SoftwarePanel {}
 impl SoftwarePanel {
@@ -316,6 +317,15 @@ impl SoftwarePanel {
         cx.notify();
     }
     fn activate(&mut self, item: Arc<Software>, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_using(item, window, cx, crate::platform::open_target);
+    }
+    fn activate_using(
+        &mut self,
+        item: Arc<Software>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        open_app: impl FnOnce(&std::path::Path) -> anyhow::Result<()>,
+    ) {
         if self.running {
             return;
         }
@@ -329,14 +339,26 @@ impl SoftwarePanel {
                 }
             }
             Action::OpenApp(path) => {
-                if let Err(error) = crate::platform::open_target(path) {
-                    self.feedback = format!("无法打开：{error:#}");
-                }
+                // Dismiss and restore local focus before Launch Services activates the app.
                 self.close_menu(window, cx);
+                match open_app(path) {
+                    Ok(()) => {
+                        self.feedback =
+                            format!("已打开 {}，请在应用内检查更新并完成安装。", item.name);
+                        cx.emit(Event::Handoff);
+                    }
+                    Err(error) => {
+                        self.feedback = format!("无法打开 {}：{error:#}", item.name);
+                    }
+                }
+                cx.notify();
             }
             Action::OpenUrl(url) => {
-                cx.open_url(url);
                 self.close_menu(window, cx);
+                cx.open_url(url);
+                self.feedback = "已请求打开更新页面，请在目标应用或页面中完成更新。".into();
+                cx.emit(Event::Handoff);
+                cx.notify();
             }
             _ => {}
         }
@@ -529,6 +551,8 @@ impl SoftwarePanel {
     }
     fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        // A later DismissEvent must not pull focus back after handing off to another app.
+        self._menu = None;
         self.focus(window, cx);
         cx.notify();
     }
@@ -550,7 +574,8 @@ impl SoftwarePanel {
             Action::Command(_) => "检查并更新".into(),
             Action::OpenUrl(url) if url.starts_with("macappstore:") => "在 App Store 中更新".into(),
             Action::OpenUrl(_) => "打开更新页面".into(),
-            _ => "在应用中更新".into(),
+            Action::OpenApp(_) => "打开应用检查更新".into(),
+            Action::Manual => "需手动更新".into(),
         };
         let mut entries = vec![
             self.menu_item(label, cx, move |this, window, cx| {
@@ -1401,7 +1426,7 @@ impl Render for SoftwarePanel {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
-    use gpui_kit::{base::Root, test::TestWindowExt};
+    use gpui_kit::{base::Root, test::TestQueryExt, test::TestWindowExt};
     use starter::software_updates::{Invocation, Source};
 
     #[test]
@@ -1430,6 +1455,99 @@ mod tests {
             pin: None,
             search: name.to_lowercase(),
         })
+    }
+    #[gpui_kit::test]
+    fn opening_an_application_explains_the_handoff_and_preserves_launch_errors(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (handle, panel) = cx
+            .update(|cx| {
+                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                    cx.new(|cx| {
+                        SoftwarePanel::from_inventory(
+                            ThemeName::Catppuccin,
+                            Arc::default(),
+                            vec![],
+                            Icons::new().0,
+                            window,
+                            cx,
+                        )
+                    })
+                })
+            })
+            .unwrap();
+        let handle: WindowHandle<Root> = handle.downcast().unwrap();
+        let handoffs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = handoffs.clone();
+        let _handoff = cx.update(|cx| {
+            cx.subscribe(&panel, move |_, event, _| {
+                if matches!(event, Event::Handoff) {
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        });
+        let mut item = (*software("Cursor", UpdateState::Available)).clone();
+        item.source = Source::Application;
+        item.action = Action::OpenApp("/Applications/Cursor.app".into());
+        let item = Arc::new(item);
+        cx.update_window(handle.into(), |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.open_menu(item.clone(), point(px(20.), px(20.)), window, cx);
+            });
+            window.render_frame(cx);
+            assert!(window.find_by_label("打开应用检查更新").visible());
+            panel.update(cx, |panel, cx| {
+                let mut opened = false;
+                panel.activate_using(item.clone(), window, cx, |path| {
+                    assert_eq!(path, std::path::Path::new("/Applications/Cursor.app"));
+                    opened = true;
+                    Ok(())
+                });
+                assert!(opened, "the selected application must be opened");
+                assert!(panel.menu.is_none());
+                assert!(
+                    panel.feedback.contains("Cursor") && panel.feedback.contains("检查更新"),
+                    "opening the app must explain the remaining update step: {:?}",
+                    panel.feedback
+                );
+                assert!(panel.terminal.is_none() && !panel.running);
+            });
+        })
+        .unwrap();
+        assert_eq!(handoffs.load(Ordering::Relaxed), 1);
+        cx.update_window(handle.into(), |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.activate_using(item.clone(), window, cx, |_| {
+                    anyhow::bail!("fixture launch error")
+                });
+                assert!(panel.feedback.contains("fixture launch error"));
+                assert!(panel.input.read(cx).focus_handle(cx).is_focused(window));
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            handoffs.load(Ordering::Relaxed),
+            1,
+            "failed launches stay visible"
+        );
+
+        // Exercise a real menu activation and its subsequent DismissEvent, without opening an OS app.
+        let url = "macappstore://showUpdatesPage";
+        cx.update_window(handle.into(), |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                let mut store = (*item).clone();
+                store.action = Action::OpenUrl(url.into());
+                panel.open_menu(Arc::new(store), point(px(20.), px(20.)), window, cx);
+            });
+            window.render_frame(cx);
+            assert!(window.find_by_label("在 App Store 中更新").visible());
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert_eq!(cx.opened_url().as_deref(), Some(url));
+        assert_eq!(handoffs.load(Ordering::Relaxed), 2);
     }
     #[gpui_kit::test]
     fn application_rows_switch_from_fallback_to_shared_bundle_icons(cx: &mut TestAppContext) {
